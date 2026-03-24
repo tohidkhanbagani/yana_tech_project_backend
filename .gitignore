@@ -1,0 +1,33 @@
+# Python stuff
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+frontend/
+src/database/database_testing.ipynb
+testing.ipynb
+seed_admin.py
+frontend_2/
+# IDE stuff
+.vscode/
+.idea/
+
+platform_frontend/
+
+# Database & Data (IMPORTANT: Don't upload your local test data)
+# data/database/
+*.db
+*.sqlite3
+dump/
+# data/images/
+# data/uploads/
+
+# Environment/Config
+.env
+ngrok.yml
+
+# OS stuff
+.DS_Store
+Thumbs.db
