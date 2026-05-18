@@ -15,6 +15,34 @@ db = DatabaseOperations()
 #          DEVELOPER TASKS
 # ==========================================
 
+from typing import List
+import json
+
+@router.post("/developer/batch-create", tags=["Timesheets & Tasks"])
+def create_developer_task_batch(tasks: List[DeveloperTaskCreate], current_user: dict = Depends(get_current_user)):
+    try:
+        results = []
+        for task in tasks:
+            data = task.model_dump(exclude_unset=True)
+            if current_user.get("role") != "admin":
+                data["employee_id"] = current_user.get("id")
+                
+            response = db.add_developer_task(data)
+            
+            # Since db.add_developer_task returns stringified JSON, parse it back to dict 
+            # to prevent double stringification issues, or handle error strings.
+            resp_dict = json.loads(response)
+            if "error" in resp_dict:
+                raise HTTPException(status_code=400, detail=resp_dict["error"])
+            results.append(resp_dict)
+            
+        return handle_response(json.dumps(results))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Router Error in create_developer_task_batch: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to submit batch developer timesheets.")
+
 @router.post("/developer/create", tags=["Timesheets & Tasks"])
 def create_developer_task(task: DeveloperTaskCreate, current_user: dict = Depends(get_current_user)):
     try:
@@ -48,6 +76,29 @@ def update_developer_task(task_id: str, task: DeveloperTaskUpdate, current_user:
 # ==========================================
 #        CONTENT CREATOR TASKS
 # ==========================================
+
+@router.post("/content/batch-create", tags=["Timesheets & Tasks"])
+def create_content_task_batch(tasks: List[ContentTaskCreate], current_user: dict = Depends(get_current_user)):
+    try:
+        results = []
+        for task in tasks:
+            data = task.model_dump(exclude_unset=True)
+            if current_user.get("role") != "admin":
+                data["employee_id"] = current_user.get("id")
+                
+            response = db.add_content_creator_task(data)
+            
+            resp_dict = json.loads(response)
+            if "error" in resp_dict:
+                raise HTTPException(status_code=400, detail=resp_dict["error"])
+            results.append(resp_dict)
+            
+        return handle_response(json.dumps(results))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Router Error in create_content_task_batch: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to submit batch content timesheets.")
 
 @router.post("/content/create", tags=["Timesheets & Tasks"])
 def create_content_task(task: ContentTaskCreate, current_user: dict = Depends(get_current_user)):
@@ -88,7 +139,14 @@ def get_all_tasks(current_user: dict = Depends(get_current_user)):
     """Fetches ALL tasks across BOTH tables. Generally for Admins & Dashboard."""
     try:
         response = db.get_all_tasks()
-        return handle_response(response)
+        data = handle_response(response)
+        # RBAC: Strip restricted financial data for ManagerAdmin
+        if current_user.get("access_level") == "ManagerAdmin" and isinstance(data, list):
+            for task in data:
+                task.pop("employee_cost", None)
+                task.pop("billing_amount", None)
+                task.pop("profit_loss", None)
+        return data
     except Exception as e:
         logger.error(f"Router Error in get_all_tasks: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to retrieve universal task list.")
@@ -111,7 +169,14 @@ def get_tasks_by_employee(employee_id: str, current_user: dict = Depends(get_cur
 
     try:
         response = db.get_tasks_by_employee(employee_id)
-        return handle_response(response)
+        data = handle_response(response)
+        # RBAC: Strip restricted financial data for ManagerAdmin
+        if current_user.get("access_level") == "ManagerAdmin" and isinstance(data, list):
+            for task in data:
+                task.pop("employee_cost", None)
+                task.pop("billing_amount", None)
+                task.pop("profit_loss", None)
+        return data
     except Exception as e:
         logger.error(f"Router Error in get_tasks_by_employee: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to retrieve employee task history.")

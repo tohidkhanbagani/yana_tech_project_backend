@@ -5,9 +5,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
+from src.endpoints.websockets import manager
+from fastapi import Request
 
 # Endpoints mapping
-from src.endpoints import auth, employees, projects, tasks, uploads, dashboard
+from src.endpoints import auth, employees, projects, tasks, uploads, dashboard, attendance, websockets, clients, checklists
 
 # Database mapping for Seeding
 from src.database.database_create import SessionLocal, engine
@@ -19,7 +21,7 @@ from src.database.database_operations import get_password_hash
 # Setup Base Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("Yana_Main_App")
-
+ 
 # --- Ensure Data Directory Exists ---
 if not os.path.exists("data"):
     os.makedirs("data", exist_ok=True)
@@ -42,9 +44,9 @@ async def lifespan(app: FastAPI):
                 default_admin = Admins(
                     username="superadmin",
                     password=get_password_hash("DefaultPassword123!"),
-                    email="admin@yanaos.com",
-                    full_name="System SuperAdmin",
-                    access_level="SuperAdmin"
+                    email="systemadmin@yanaos.com",
+                    full_name="SuperAdmin",
+                    access_level="SystemAdmin"
                 )
                 session.add(default_admin)
                 session.commit()
@@ -92,7 +94,25 @@ app.include_router(projects.router)
 app.include_router(employees.router)
 app.include_router(uploads.router)
 app.include_router(dashboard.router) # The new Phase 5 Lightning Fast Dashboard
+app.include_router(attendance.router)
+app.include_router(clients.router)
+app.include_router(websockets.router)
+app.include_router(checklists.router)
+
+
+
+@app.middleware("http")
+async def broadcast_middleware(request: Request, call_next):
+    response = await call_next(request)
+    if request.method in ["POST", "PUT", "DELETE", "PATCH"]:
+        if response.status_code >= 200 and response.status_code < 300:
+            # We don't want to broadcast on login or file uploads generally, but doing it globally is safe enough for a small app.
+            # Skip for login to prevent unnecessary broadcasts
+            if "/auth/login" not in request.url.path:
+                await manager.broadcast({"action": "REFRESH_WORKSPACE"})
+    return response
 
 if __name__ == "__main__":
+    # pyrefly: ignore [missing-import]
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host="[IP_ADDRESS]", port=8001, reload=True)

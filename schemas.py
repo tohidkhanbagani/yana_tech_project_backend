@@ -30,7 +30,7 @@ class DepartmentRoleUpdate(ConfiguredBaseModel):
 # ==========================================
 class AdminCreate(ConfiguredBaseModel):
     username: str = Field(..., min_length=4, max_length=50, description="Unique login ID")
-    password: str = Field(..., min_length=8, description="Must be at least 8 characters")
+    password: Optional[str] = Field(None, min_length=8, description="Must be at least 8 characters")
     email: Optional[EmailStr] = Field(None, description="Valid email address")
     full_name: Optional[str] = Field("N/A", description="Admin's full name")
     access_level: Optional[str] = Field("SystemAdmin", description="Privilege level (e.g., SuperAdmin, SystemAdmin)")
@@ -58,7 +58,7 @@ class EmployeeCreate(ConfiguredBaseModel):
     # Financial Auto-Calc Factors
     hourly_cost_rate: Optional[float] = Field(0.0, ge=0.0, description="Cost to the company per hour")
     hourly_billing_rate: Optional[float] = Field(0.0, ge=0.0, description="Amount billed to client per hour")
-    salary: Optional[float] = Field(0.0, ge=0.0, description="Annual or monthly salary")
+    salary: Optional[float] = Field(0.0, ge=0.0, description="Monthly salary")
     
     # Keeping it flexible for the myriad of string fields in your DB
     department: Optional[str] = "N/A"
@@ -79,31 +79,74 @@ class EmployeeUpdate(ConfiguredBaseModel):
     
     model_config = ConfigDict(extra="allow", from_attributes=True) 
 
+class ManagerCreate(ConfiguredBaseModel):
+    name: str = Field(..., min_length=2, description="Manager Name")
+
+class ClientCreate(ConfiguredBaseModel):
+    name: str = Field(..., min_length=2, description="Client Name")
+    company: Optional[str] = Field("N/A", description="Company Name")
+    email: Optional[EmailStr] = None
+    phone: Optional[str] = Field("N/A", description="Contact Number")
+    address: Optional[str] = Field("N/A", description="Physical Address")
+
+class ClientUpdate(ConfiguredBaseModel):
+    name: Optional[str] = None
+    company: Optional[str] = None
+    email: Optional[EmailStr] = None
+    phone: Optional[str] = None
+    address: Optional[str] = None
+
 # ==========================================
 #        PROJECT & TIMELINE SCHEMAS
 # ==========================================
 class ProjectCreate(ConfiguredBaseModel):
     name: str = Field(..., min_length=2, description="Project Name")
+    project_type: Optional[str] = Field("Engineering", description="Engineering, Content, or Both")
     manager: Optional[str] = "N/A"
     status: Optional[str] = Field("Pending", description="Pending, Active, Completed, Cancelled")
     client_cost: Optional[float] = Field(0.0, ge=0.0)
     budget: Optional[float] = Field(0.0, ge=0.0)
     approx_cost: Optional[float] = Field(0.0, ge=0.0)
     srs_id: Optional[str] = Field(None, description="UUID of the linked SRS Document")
-    
+
     model_config = ConfigDict(extra="allow")
 
 class ProjectUpdate(ConfiguredBaseModel):
     name: Optional[str] = None
+    project_type: Optional[str] = None
     status: Optional[str] = None
     srs_id: Optional[str] = None
     model_config = ConfigDict(extra="allow")
 
+class ProjectExpenseCreate(ConfiguredBaseModel):
+    project_id: str
+    expense_name: str
+    amount: float = Field(..., gt=0.0)
+    expense_date: Optional[str] = "N/A"
+    description: Optional[str] = "N/A"
+
+class ProjectPaymentCreate(ConfiguredBaseModel):
+    project_id: str = Field(..., description="UUID of the Project")
+    amount: float = Field(..., gt=0.0, description="Amount paid by the client")
+    payment_date: Optional[datetime] = Field(default_factory=datetime.now)
+    payment_method: Optional[str] = "Bank Transfer"
+    reference_number: Optional[str] = "N/A"
+    remarks: Optional[str] = "N/A"
+
+class ProjectPaymentUpdate(ConfiguredBaseModel):
+    amount: Optional[float] = Field(None, gt=0.0)
+    payment_method: Optional[str] = None
+    reference_number: Optional[str] = None
+    remarks: Optional[str] = None
+
 class ProjectAssignmentCreate(ConfiguredBaseModel):
     project_id: str = Field(..., description="UUID of the Project")
     employee_id: str = Field(..., description="UUID of the Employee")
-    custom_hourly_cost: Optional[float] = Field(None, ge=0.0)
     custom_hourly_billing: Optional[float] = Field(None, ge=0.0)
+
+class MilestoneAssignmentCreate(ConfiguredBaseModel):
+    milestone_id: str = Field(..., description="UUID of the Milestone")
+    employee_id: str = Field(..., description="UUID of the Employee")
 
 class SRSCreate(ConfiguredBaseModel):
     project_id: str = Field(..., description="UUID of the parent project")
@@ -139,10 +182,11 @@ class DeveloperTaskCreate(ConfiguredBaseModel):
     """
     employee_id: str = Field(..., description="UUID of the employee logging the task")
     project_id: Optional[str] = Field(None, description="UUID of the project")
+    milestone_id: Optional[str] = Field(None, description="UUID of the milestone")
     date: Optional[datetime] = Field(default_factory=datetime.now)
-    
+
     hours_logged: float = Field(..., gt=0.0, le=24.0, description="Must be greater than 0 and max 24")
-    tech_stack: Optional[str] = "N/A"
+    tech_stack: Optional[str] = "N/A"    
     github_link: Optional[str] = "N/A"
     task_performed: str = Field(..., min_length=5, description="Description of the work done")
     tomorrow_plan: Optional[str] = "N/A"
@@ -161,11 +205,11 @@ class ContentTaskCreate(ConfiguredBaseModel):
     """
     employee_id: str = Field(..., description="UUID of the employee logging the task")
     project_id: Optional[str] = Field(None, description="UUID of the project")
+    milestone_id: Optional[str] = Field(None, description="UUID of the milestone")
     date: Optional[datetime] = Field(default_factory=datetime.now)
-    
+
     hours_logged: float = Field(..., gt=0.0, le=24.0, description="Must be greater than 0 and max 24")
-    task_performed: str = Field(..., min_length=5, description="Description of the work done")
-    
+    task_performed: str = Field(..., min_length=5, description="Description of the work done")    
     reels_count: Optional[int] = Field(0, ge=0, description="Cannot be negative")
     long_video_count: Optional[int] = Field(0, ge=0, description="Cannot be negative")
     poster_count: Optional[int] = Field(0, ge=0, description="Cannot be negative")

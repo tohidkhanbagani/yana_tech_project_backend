@@ -25,7 +25,8 @@ router = APIRouter(
 #              AUTH CONFIGURATION
 # ==========================================
 
-SECRET_KEY = "yana-super-secret-key-change-this-in-production"
+import os
+SECRET_KEY = os.getenv("SECRET_KEY", "yana-super-secret-key-change-this-in-production")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 480 # Extended to 8 hours for workday comfort
 
@@ -113,7 +114,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
                 user = session.query(Admins).filter(Admins.id == user_id).first()
                 if user is None:
                     raise credentials_exception
-                return {"id": user.id, "username": user.username, "role": "admin"}
+                return {"id": user.id, "username": user.username, "role": "admin", "access_level": user.access_level}
                 
             # 2. Employee Verification
             elif user_role.lower() == "employee":
@@ -154,7 +155,7 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends()):
                 
                 # Log success & Generate Token
                 db.log_login_history(user_id=admin.id, user_role="Admin", ip_address=client_ip, user_agent=user_agent)
-                token_data = {"sub": admin.username, "id": admin.id, "role": "admin"}
+                token_data = {"sub": admin.username, "id": admin.id, "role": "admin", "access_level": admin.access_level}
                 access_token = create_access_token(data=token_data, expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
                 
                 return {"access_token": access_token, "token_type": "bearer"}

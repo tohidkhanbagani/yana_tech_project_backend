@@ -6,6 +6,8 @@ from schemas import (
     DepartmentRoleCreate, DepartmentRoleUpdate
 )
 from src.database.database_operations import DatabaseOperations
+from src.database.database_create import SessionLocal
+from src.database.database_tables import Admins
 from src.endpoints.auth import get_current_user, handle_response
 
 logger = logging.getLogger("Yana_Employees_Router")
@@ -39,7 +41,15 @@ def get_all_employees(current_user: dict = Depends(get_current_user)):
 def get_employee(employee_id: str, current_user: dict = Depends(get_current_user)):
     try:
         response = db.get_employee(employee_id)
-        return handle_response(response)
+        data = handle_response(response)
+        
+        # RBAC: Strip financial data for ManagerAdmins
+        if current_user.get("access_level") == "ManagerAdmin" and isinstance(data, dict):
+            data.pop("salary", None)
+            data.pop("hourly_cost_rate", None)
+            data.pop("hourly_billing_rate", None)
+            
+        return data
     except Exception as e:
         logger.error(f"Router Error in get_employee: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to fetch employee details.")
@@ -74,9 +84,9 @@ def delete_employee(employee_id: str, current_user: dict = Depends(get_current_u
 
 @router.post("/admins/create", tags=["Admins"])
 def create_admin(admin: AdminCreate, current_user: dict = Depends(get_current_user)):
-    # Restrict creation to other admins only
-    if current_user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Only administrators can create other admins.")
+    # Restrict creation to SystemAdmins only
+    if current_user.get("access_level") != "SystemAdmin":
+        raise HTTPException(status_code=403, detail="Only System Administrators can create other admins.")
     
     try:
         data = admin.model_dump(exclude_unset=True)
@@ -86,9 +96,21 @@ def create_admin(admin: AdminCreate, current_user: dict = Depends(get_current_us
         logger.error(f"Router Error in create_admin: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to create administrator account.")
 
+@router.get("/admins/me", tags=["Admins"])
+def get_current_admin(current_user: dict = Depends(get_current_user)):
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Not authorized.")
+    try:
+        admin_id = current_user.get("id")
+        response = db.get_admin(admin_id)
+        return handle_response(response)
+    except Exception as e:
+        logger.error(f"Router Error in get_current_admin: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to fetch current admin profile.")
+
 @router.get("/admins/all", tags=["Admins"])
 def get_all_admins(current_user: dict = Depends(get_current_user)):
-    if current_user.get("role") != "admin":
+    if current_user.get("access_level") != "SystemAdmin":
         raise HTTPException(status_code=403, detail="Access denied.")
     try:
         response = db.get_all_admins()
@@ -99,8 +121,8 @@ def get_all_admins(current_user: dict = Depends(get_current_user)):
 
 @router.put("/admins/update/{admin_id}", tags=["Admins"])
 def update_admin(admin_id: str, admin: AdminUpdate, current_user: dict = Depends(get_current_user)):
-    if current_user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Access denied.")
+    if current_user.get("access_level") != "SystemAdmin" and current_user.get("id") != admin_id:
+        raise HTTPException(status_code=403, detail="Access denied. You can only update your own profile or must be a System Administrator.")
     try:
         data = admin.model_dump(exclude_unset=True)
         if not data:
@@ -112,6 +134,39 @@ def update_admin(admin_id: str, admin: AdminUpdate, current_user: dict = Depends
     except Exception as e:
         logger.error(f"Router Error in update_admin: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to update administrator.")
+
+@router.delete("/admins/delete/{admin_id}", tags=["Admins"])
+def delete_admin(admin_id: str, current_user: dict = Depends(get_current_user)):
+    # 1. Access Control: Only SystemAdmin can perform deletions
+    if current_user.get("access_level") != "SystemAdmin":
+        raise HTTPException(status_code=403, detail="Security Restriction: Only System Administrators can manage system access credentials.")
+    
+    try:
+        with SessionLocal() as session:
+            # 2. Verify target existence and level
+            target = session.query(Admins).filter(Admins.id == admin_id).first()
+            if not target:
+                raise HTTPException(status_code=404, detail="Administrator account not found.")
+            
+            # 3. RBAC Logic: 
+            # - SystemAdmins can delete HR/Manager admins.
+            # - SystemAdmins can delete THEMSELVES.
+            # - SystemAdmins CANNOT delete OTHER SystemAdmins.
+            if target.access_level == "SystemAdmin" and admin_id != current_user.get("id"):
+                raise HTTPException(status_code=403, detail="Security Violation: You cannot delete another System Administrator account. Please contact the lead architect.")
+            
+            # 4. Execute Deletion directly using the current session
+            session.delete(target)
+            session.commit()
+            
+            logger.info(f"ADMIN DELETION SUCCESS: Administrator @{target.username} (ID: {admin_id}) removed by @{current_user.get('username')}")
+            return {"message": "Administrator account deleted successfully."}
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Router Error in delete_admin: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to delete administrator account.")
 
 
 # ==========================================

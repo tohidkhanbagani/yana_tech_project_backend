@@ -42,3 +42,5 @@ def update_user(user_id: str, user: UserUpdate, current_user: dict = Depends(get
 def delete_user(user_id: str, current_user: dict = Depends(get_current_user)):
     response = db.delete_user(user_id)
     return handle_response(response)
+
+

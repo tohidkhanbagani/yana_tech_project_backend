@@ -1,3 +1,7 @@
+import os
+import shutil
+import glob
+
 import uuid as _uuid
 import json
 import logging
@@ -6,13 +10,14 @@ from typing import Dict, List, Any, Optional
 
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError, NoResultFound
 from sqlalchemy.inspection import inspect
+from sqlalchemy import cast, Date, func, case
 from passlib.context import CryptContext
 
 from .database_create import SessionLocal
 from .database_tables import (
-    Departments_Roles, Admins, Employees, LoginHistory,
-    Projects, SRS_Documents, ProjectTimeline, ProjectAssignments,
-    DeveloperTasks, ContentCreatorTasks
+    Departments_Roles, Admins, Employees, LoginHistory, Managers,
+    Projects, SRS_Documents, ProjectTimeline, ProjectAssignments, MilestoneAssignments,
+    DeveloperTasks, ContentCreatorTasks, ProjectExpenses, Attendance, LeaveRequest, ProjectPayments
 )
 # ==========================================
 #              LOGGING SETUP
@@ -71,6 +76,30 @@ class DatabaseOperations:
             })
 
     # ==========================================
+    #              MANAGERS
+    # ==========================================
+
+    def add_manager(self, data: dict) -> str:
+        with self.SessionLocal() as session:
+            try:
+                new_manager = Managers(**data)
+                session.add(new_manager)
+                session.commit()
+                session.refresh(new_manager)
+                return json.dumps(self.model_to_dict(new_manager), indent=4, default=str)
+            except Exception as e:
+                session.rollback()
+                return self._handle_error("add_manager", e, context={"name": data.get("name")})
+
+    def get_all_managers(self) -> str:
+        with self.SessionLocal() as session:
+            try:
+                managers = session.query(Managers).all()
+                return json.dumps([self.model_to_dict(m) for m in managers], indent=4, default=str)
+            except Exception as e:
+                return self._handle_error("get_all_managers", e)
+
+    # ==========================================
     #        DEPARTMENTS & ROLES (PHASE 2)
     # ==========================================
 
@@ -102,17 +131,50 @@ class DatabaseOperations:
     def add_admin(self, data: dict) -> str:
         with self.SessionLocal() as session:
             try:
-                if 'password' in data:
-                    data['password'] = get_password_hash(data['password'])
+                default_password = data.get("password") or "AdminPass123!"
+                data['password'] = get_password_hash(default_password)
                 
                 new_admin = Admins(**data)
                 session.add(new_admin)
                 session.commit()
                 session.refresh(new_admin)
                 
+                # Automatically create Employee Profile and insert into Managers table if access_level is ManagerAdmin
+                if new_admin.access_level == "ManagerAdmin":
+                    # Create Employees profile
+                    existing_emp = session.query(Employees).filter_by(username=new_admin.username).first()
+                    if not existing_emp:
+                        # Find a role with "manager" in name, or default role
+                        manager_role = session.query(Departments_Roles).filter(Departments_Roles.role_name.ilike("%manager%")).first()
+                        role_id = manager_role.id if manager_role else None
+                        
+                        # Generate unique email if N/A
+                        email_val = new_admin.email if new_admin.email and new_admin.email != "N/A" else f"{new_admin.username}@yanatech.com"
+                        
+                        new_emp = Employees(
+                            username=new_admin.username,
+                            password=new_admin.password,
+                            # plain_password=default_password,
+                            full_name=new_admin.full_name if new_admin.full_name and new_admin.full_name != "N/A" else new_admin.username,
+                            email=email_val,
+                            role_id=role_id,
+                            is_active=True
+                        )
+                        session.add(new_emp)
+                    
+                    # Insert into Managers registry
+                    mgr_name = new_admin.full_name if new_admin.full_name and new_admin.full_name != "N/A" else new_admin.username
+                    existing_mgr = session.query(Managers).filter_by(name=mgr_name).first()
+                    if not existing_mgr:
+                        new_mgr = Managers(name=mgr_name)
+                        session.add(new_mgr)
+                    
+                    session.commit()
+                
                 # Strip password from return dict for security
                 res_dict = self.model_to_dict(new_admin)
                 res_dict.pop('password', None)
+                res_dict['generated_password'] = default_password # Expose plaintext once
                 
                 logger.info(f"Created new Admin: {new_admin.username}")
                 return json.dumps(res_dict, indent=4, default=str)
@@ -142,6 +204,14 @@ class DatabaseOperations:
                 # 2. Password Handling
                 default_password = data.get("password") or "YanaUser123!"
                 data["password"] = get_password_hash(default_password)
+                # data["plain_password"] = default_password
+
+                # 2.5 Salary -> Hourly Cost Auto-calculation
+                salary_val = float(data.get("salary") or 0.0)
+                data["hourly_cost_rate"] = salary_val / (26 * 8)
+
+                # Remove extra fields not in table
+                data.pop("department", None)
 
                 # 3. Insert Database Record
                 new_employee = Employees(**data)
@@ -179,9 +249,14 @@ class DatabaseOperations:
                     return json.dumps({"error": f"Employee {employee_id} not found."})
                 
                 for key, value in data.items():
-                    if key == "password":
-                        value = get_password_hash(value)
-                    setattr(employee, key, value)
+                    if hasattr(employee, key):
+                        if key == "password":
+                            value = get_password_hash(value)
+                        setattr(employee, key, value)
+                
+                # Auto-recalculate hourly cost rate when salary is edited
+                if "salary" in data:
+                    employee.hourly_cost_rate = float(data["salary"] or 0.0) / (26 * 8)
                 
                 session.commit()
                 session.refresh(employee)
@@ -226,8 +301,6 @@ class DatabaseOperations:
                     if not assignment:
                         return json.dumps({"error": "You are not assigned to this project. Access denied."})
 
-                    if assignment.custom_hourly_cost is not None:
-                        cost_rate = float(assignment.custom_hourly_cost)
                     if assignment.custom_hourly_billing is not None:
                         billing_rate = float(assignment.custom_hourly_billing)
 
@@ -239,6 +312,24 @@ class DatabaseOperations:
                 # Save Task
                 new_task = DeveloperTasks(**data)
                 session.add(new_task)
+                
+                # Check and update project status if it's currently 'Planning'
+                if project_id:
+                    project = session.query(Projects).filter_by(id=project_id).first()
+                    if project and project.status == 'Planning':
+                        project.status = 'In Progress'
+                        logger.info(f"Project {project_id} status updated to 'In Progress' due to new developer task.")
+                
+                # Check and update milestone status and actual_start date
+                milestone_id = data.get("milestone_id")
+                if milestone_id:
+                    milestone = session.query(ProjectTimeline).filter_by(id=milestone_id).first()
+                    if milestone:
+                        if milestone.status == 'Pending':
+                            milestone.status = 'Active'
+                        if not milestone.actual_start:
+                            milestone.actual_start = datetime.now()
+                        
                 session.commit()
                 session.refresh(new_task)
                 
@@ -282,8 +373,6 @@ class DatabaseOperations:
                     if not assignment:
                         return json.dumps({"error": "You are not assigned to this project. Access denied."})
 
-                    if assignment.custom_hourly_cost is not None:
-                        cost_rate = float(assignment.custom_hourly_cost)
                     if assignment.custom_hourly_billing is not None:
                         billing_rate = float(assignment.custom_hourly_billing)
 
@@ -302,6 +391,24 @@ class DatabaseOperations:
                 # Save Task
                 new_task = ContentCreatorTasks(**data)
                 session.add(new_task)
+                
+                # Check and update project status if it's currently 'Planning'
+                if project_id:
+                    project = session.query(Projects).filter_by(id=project_id).first()
+                    if project and project.status == 'Planning':
+                        project.status = 'In Progress'
+                        logger.info(f"Project {project_id} status updated to 'In Progress' due to new content task.")
+                        
+                # Check and update milestone status and actual_start date
+                milestone_id = data.get("milestone_id")
+                if milestone_id:
+                    milestone = session.query(ProjectTimeline).filter_by(id=milestone_id).first()
+                    if milestone:
+                        if milestone.status == 'Pending':
+                            milestone.status = 'Active'
+                        if not milestone.actual_start:
+                            milestone.actual_start = datetime.now()
+                        
                 session.commit()
                 session.refresh(new_task)
 
@@ -343,7 +450,9 @@ class DatabaseOperations:
     def add_project(self, data: dict) -> str:
         with self.SessionLocal() as session:
             try:
-                new_project = Projects(**data)
+                valid_keys = {c.key for c in inspect(Projects).mapper.column_attrs}
+                filtered_data = {k: v for k, v in data.items() if k in valid_keys}
+                new_project = Projects(**filtered_data)
                 session.add(new_project)
                 session.commit()
                 session.refresh(new_project)
@@ -353,31 +462,113 @@ class DatabaseOperations:
                 return self._handle_error("add_project", e, context=data)
 
     def _calculate_project_progress(self, session, proj) -> str:
-        """Helper to dynamically calculate progress based on burn vs budget"""
+        """
+        System of Control Fix: Progress is now measured by Work Done (Milestones), 
+        not by Money Spent (Budget).
+        Falls back to manually set database progress if no milestones are defined.
+        """
         try:
-            budget = float(proj.budget or 0)
-            if budget <= 0:
-                return proj.progress or "N/A"
+            total_milestones = session.query(ProjectTimeline).filter_by(project_id=proj.id).count()
+            if total_milestones == 0:
+                return proj.progress if hasattr(proj, 'progress') and proj.progress else "0%"
             
-            from sqlalchemy import func
-            d_cost = session.query(func.coalesce(func.sum(DeveloperTasks.employee_cost), 0)).filter(DeveloperTasks.project_id == proj.id).scalar()
-            c_cost = session.query(func.coalesce(func.sum(ContentCreatorTasks.employee_cost), 0)).filter(ContentCreatorTasks.project_id == proj.id).scalar()
+            completed_milestones = session.query(ProjectTimeline).filter(
+                ProjectTimeline.project_id == proj.id,
+                ProjectTimeline.status.ilike("%completed%")
+            ).count()
             
-            total_cost = float(d_cost) + float(c_cost)
-            progress_pct = min(100, int((total_cost / budget) * 100))
+            progress_pct = int((completed_milestones / total_milestones) * 100)
             return f"{progress_pct}%"
         except Exception:
-            return proj.progress or "N/A"
+            return proj.progress if hasattr(proj, 'progress') and proj.progress else "0%"
+
+    def _calculate_payment_stats(self, session, proj) -> dict:
+        """
+        Computes the financial state of a project on the fly.
+        """
+        try:
+            payments = session.query(ProjectPayments).filter_by(project_id=proj.id).all()
+            total_paid = sum(p.amount for p in payments)
+            client_cost = float(proj.client_cost or 0.0)
+            pending_amount = max(0.0, client_cost - total_paid)
+            
+            if total_paid >= client_cost and client_cost > 0:
+                payment_status = "Paid in Full"
+            elif total_paid > 0:
+                payment_status = "Partial"
+            else:
+                payment_status = "Unpaid"
+                
+            return {
+                "total_paid": total_paid,
+                "pending_amount": pending_amount,
+                "payment_status": payment_status
+            }
+        except Exception:
+            return {
+                "total_paid": 0.0,
+                "pending_amount": float(proj.client_cost or 0.0),
+                "payment_status": "Unpaid"
+            }
 
     def get_all_projects(self) -> str:
         with self.SessionLocal() as session:
             try:
-                projects = session.query(Projects).all()
+                # Aggregate Payments
+                payment_agg = session.query(
+                    ProjectPayments.project_id,
+                    func.sum(ProjectPayments.amount).label("total_paid")
+                ).group_by(ProjectPayments.project_id).subquery()
+                
+                # Aggregate Timeline (Milestones)
+                timeline_agg = session.query(
+                    ProjectTimeline.project_id,
+                    func.count(ProjectTimeline.id).label("total_milestones"),
+                    func.sum(case((ProjectTimeline.status.ilike("%completed%"), 1), else_=0)).label("completed_milestones")
+                ).group_by(ProjectTimeline.project_id).subquery()
+                
+                # Main Query with Joins
+                query = session.query(
+                    Projects,
+                    func.coalesce(payment_agg.c.total_paid, 0).label("total_paid"),
+                    func.coalesce(timeline_agg.c.total_milestones, 0).label("total_milestones"),
+                    func.coalesce(timeline_agg.c.completed_milestones, 0).label("completed_milestones")
+                ).outerjoin(
+                    payment_agg, Projects.id == payment_agg.c.project_id
+                ).outerjoin(
+                    timeline_agg, Projects.id == timeline_agg.c.project_id
+                )
+                
+                results = query.all()
+                
                 res_list = []
-                for p in projects:
-                    p_dict = self.model_to_dict(p)
-                    p_dict['progress'] = self._calculate_project_progress(session, p)
+                for proj, total_paid, total_milestones, completed_milestones in results:
+                    p_dict = self.model_to_dict(proj)
+                    
+                    # Progress calculation
+                    if total_milestones > 0:
+                        p_dict['progress'] = f"{int((completed_milestones / total_milestones) * 100)}%"
+                    else:
+                        p_dict['progress'] = proj.progress if hasattr(proj, 'progress') and proj.progress else "0%"
+                        
+                    # Payment calculation
+                    client_cost = float(proj.client_cost or 0.0)
+                    total_paid = float(total_paid or 0.0)
+                    pending_amount = max(0.0, client_cost - total_paid)
+                    
+                    if total_paid >= client_cost and client_cost > 0:
+                        payment_status = "Paid in Full"
+                    elif total_paid > 0:
+                        payment_status = "Partial"
+                    else:
+                        payment_status = "Unpaid"
+                        
+                    p_dict['total_paid'] = total_paid
+                    p_dict['pending_amount'] = pending_amount
+                    p_dict['payment_status'] = payment_status
+                    
                     res_list.append(p_dict)
+                    
                 return json.dumps(res_list, indent=4, default=str)
             except Exception as e:
                 return self._handle_error("get_all_projects", e)
@@ -387,6 +578,15 @@ class DatabaseOperations:
             try:
                 new_srs = SRS_Documents(**data)
                 session.add(new_srs)
+                session.flush() # Ensure ID is generated
+                
+                # Link the active SRS to the Project
+                project_id = data.get("project_id")
+                if project_id:
+                    project = session.query(Projects).filter_by(id=project_id).first()
+                    if project:
+                        project.srs_id = new_srs.id
+                        
                 session.commit()
                 session.refresh(new_srs)
                 return json.dumps(self.model_to_dict(new_srs), indent=4, default=str)
@@ -428,6 +628,19 @@ class DatabaseOperations:
             try:
                 new_milestone = ProjectTimeline(**data)
                 session.add(new_milestone)
+                session.flush()
+
+                project_id = new_milestone.project_id
+                total = session.query(func.count(ProjectTimeline.id)).filter_by(project_id=project_id).scalar()
+                if total and total > 0:
+                    completed = session.query(func.count(ProjectTimeline.id)).filter(
+                        ProjectTimeline.project_id == project_id,
+                        ProjectTimeline.status.ilike('%completed%')
+                    ).scalar()
+                    proj = session.query(Projects).filter_by(id=project_id).first()
+                    if proj:
+                        proj.progress = f"{int((completed / total) * 100)}%"
+
                 session.commit()
                 session.refresh(new_milestone)
                 return json.dumps(self.model_to_dict(new_milestone), indent=4, default=str)
@@ -435,14 +648,75 @@ class DatabaseOperations:
                 session.rollback()
                 return self._handle_error("add_project_timeline", e, context=data)
 
-    def get_project_timeline(self, project_id: str) -> str:
+    def get_project_timeline(self, project_id: str, employee_id: str = None) -> str:
         with self.SessionLocal() as session:
             try:
-                timeline = session.query(ProjectTimeline).filter_by(project_id=project_id).order_by(ProjectTimeline.expected_start).all()
+                query = session.query(ProjectTimeline).filter_by(project_id=project_id)
+                
+                if employee_id:
+                    # Filter milestones to show only those where the employee is assigned
+                    query = query.join(
+                        MilestoneAssignments, ProjectTimeline.id == MilestoneAssignments.milestone_id
+                    ).filter(MilestoneAssignments.employee_id == employee_id)
+                
+                timeline = query.order_by(ProjectTimeline.expected_start).all()
                 res_list = [self.model_to_dict(t) for t in timeline]
                 return json.dumps(res_list, indent=4, default=str)
             except Exception as e:
                 return self._handle_error("get_project_timeline", e, context={"project_id": project_id})
+                
+    def assign_employee_to_milestone(self, data: dict) -> str:
+        with self.SessionLocal() as session:
+            try:
+                existing = session.query(MilestoneAssignments).filter_by(
+                    milestone_id=data.get("milestone_id"),
+                    employee_id=data.get("employee_id")
+                ).first()
+                if existing:
+                    return json.dumps({"error": "Employee is already assigned to this milestone."})
+                
+                new_assignment = MilestoneAssignments(**data)
+                session.add(new_assignment)
+                session.commit()
+                session.refresh(new_assignment)
+                return json.dumps(self.model_to_dict(new_assignment), indent=4, default=str)
+            except Exception as e:
+                session.rollback()
+                return self._handle_error("assign_employee_to_milestone", e, context=data)
+
+    def get_milestone_assignments(self, milestone_id: str) -> str:
+        with self.SessionLocal() as session:
+            try:
+                assignments = session.query(MilestoneAssignments, Employees, Departments_Roles).join(
+                    Employees, MilestoneAssignments.employee_id == Employees.id
+                ).outerjoin(
+                    Departments_Roles, Employees.role_id == Departments_Roles.id
+                ).filter(MilestoneAssignments.milestone_id == milestone_id).all()
+                
+                res_list = []
+                for assign, emp, role in assignments:
+                    a_dict = self.model_to_dict(assign)
+                    a_dict['full_name'] = emp.full_name
+                    a_dict['job_title'] = role.role_name if role else "Employee"
+                    a_dict['photo'] = emp.photo
+                    res_list.append(a_dict)
+                    
+                return json.dumps(res_list, indent=4, default=str)
+            except Exception as e:
+                return self._handle_error("get_milestone_assignments", e, context={"milestone_id": milestone_id})
+
+    def unassign_employee_from_milestone(self, assignment_id: str) -> str:
+        with self.SessionLocal() as session:
+            try:
+                assignment = session.query(MilestoneAssignments).filter_by(id=assignment_id).first()
+                if not assignment:
+                    return json.dumps({"error": "Milestone assignment not found."})
+                session.delete(assignment)
+                session.commit()
+                return json.dumps({"message": "Employee unassigned from milestone successfully."})
+            except Exception as e:
+                session.rollback()
+                return self._handle_error("unassign_employee_from_milestone", e, context={"assignment_id": assignment_id})
 
     # ==========================================
     #     PROJECT ASSIGNMENTS (PHASE 5)
@@ -516,6 +790,7 @@ class DatabaseOperations:
                 res_list = []
                 for assign, proj in assignments:
                     p_dict = self.model_to_dict(proj)
+                    p_dict['progress'] = self._calculate_project_progress(session, proj)
                     res_list.append(p_dict)
                     
                 return json.dumps(res_list, indent=4, default=str)
@@ -561,8 +836,6 @@ class DatabaseOperations:
                 return self._handle_error("get_employee", e)
 
     def delete_employee(self, employee_id: str) -> str:
-        import os
-        import shutil
         with self.SessionLocal() as session:
             try:
                 emp = session.query(Employees).filter_by(id=employee_id).first()
@@ -590,7 +863,25 @@ class DatabaseOperations:
                     return json.dumps({"error": "Project not found"})
                 
                 p_dict = self.model_to_dict(proj)
+
+                # Fetch Assignments
+                assignments = session.query(ProjectAssignments).filter_by(project_id=project_id).all()
+                assigned_employees = []
+                for assign in assignments:
+                    emp = session.query(Employees).filter_by(id=assign.employee_id).first()
+                    if emp:
+                        e_dict = self.model_to_dict(emp)
+                        e_dict['custom_hourly_cost'] = assign.custom_hourly_cost
+                        e_dict['custom_hourly_billing'] = assign.custom_hourly_billing
+                        assigned_employees.append(e_dict)
+                
+                p_dict['assigned_employees'] = assigned_employees
                 p_dict['progress'] = self._calculate_project_progress(session, proj)
+                
+                # Compute Payment Stats
+                pay_stats = self._calculate_payment_stats(session, proj)
+                p_dict.update(pay_stats)
+                
                 return json.dumps(p_dict, indent=4, default=str)
             except Exception as e:
                 return self._handle_error("get_project", e)
@@ -602,7 +893,8 @@ class DatabaseOperations:
                 if not proj:
                     return json.dumps({"error": "Project not found"})
                 for key, value in data.items():
-                    setattr(proj, key, value)
+                    if hasattr(proj, key):
+                        setattr(proj, key, value)
                 session.commit()
                 session.refresh(proj)
                 return json.dumps(self.model_to_dict(proj), indent=4, default=str)
@@ -611,9 +903,7 @@ class DatabaseOperations:
                 return self._handle_error("edit_project", e, context={"project_id": project_id})
 
     def delete_project(self, project_id: str) -> str:
-        import os
-        import shutil
-        import glob
+
         with self.SessionLocal() as session:
             try:
                 proj = session.query(Projects).filter_by(id=project_id).first()
@@ -635,13 +925,48 @@ class DatabaseOperations:
                         shutil.rmtree(folder_path)
                         logger.info(f"Deleted SRS upload folder: {folder_path}")
 
-                # Delete the project (cascading deletes will handle DB child records)
+                # Delete all payment records
+                session.query(ProjectPayments).filter_by(project_id=project_id).delete()
+
                 session.delete(proj)
                 session.commit()
-                return json.dumps({"message": "Project and all associated SRS files deleted successfully"})
+                return json.dumps({"message": "Project and all associated data deleted successfully"})
             except Exception as e:
                 session.rollback()
                 return self._handle_error("delete_project", e)
+
+    def add_project_expense(self, data: dict) -> str:
+        with self.SessionLocal() as session:
+            try:
+                expense = ProjectExpenses(**data)
+                session.add(expense)
+                session.commit()
+                session.refresh(expense)
+                return json.dumps(self.model_to_dict(expense), indent=4, default=str)
+            except Exception as e:
+                session.rollback()
+                return self._handle_error("add_project_expense", e, context=data)
+
+    def get_project_expenses(self, project_id: str) -> str:
+        with self.SessionLocal() as session:
+            try:
+                expenses = session.query(ProjectExpenses).filter_by(project_id=project_id).all()
+                return json.dumps([self.model_to_dict(e) for e in expenses], indent=4, default=str)
+            except Exception as e:
+                return self._handle_error("get_project_expenses", e)
+
+    def delete_project_expense(self, expense_id: str) -> str:
+        with self.SessionLocal() as session:
+            try:
+                expense = session.query(ProjectExpenses).filter_by(id=expense_id).first()
+                if not expense:
+                    return json.dumps({"error": f"Expense not found."})
+                session.delete(expense)
+                session.commit()
+                return json.dumps({"message": f"Expense deleted."})
+            except Exception as e:
+                session.rollback()
+                return self._handle_error("delete_project_expense", e)
 
     def get_task(self, task_id: str) -> str:
         with self.SessionLocal() as session:
@@ -806,19 +1131,6 @@ class DatabaseOperations:
                 session.rollback()
                 return self._handle_error("edit_srs_document", e, context={"srs_id": srs_id})
 
-    def delete_srs_document(self, srs_id: str) -> str:
-        with self.SessionLocal() as session:
-            try:
-                srs = session.query(SRS_Documents).filter_by(id=srs_id).first()
-                if not srs:
-                    return json.dumps({"error": "SRS not found"})
-                session.delete(srs)
-                session.commit()
-                return json.dumps({"message": "SRS deleted successfully"})
-            except Exception as e:
-                session.rollback()
-                return self._handle_error("delete_srs_document", e)
-
     def edit_project_timeline(self, timeline_id: str, data: dict) -> str:
         with self.SessionLocal() as session:
             try:
@@ -827,6 +1139,20 @@ class DatabaseOperations:
                     return json.dumps({"error": "Timeline milestone not found"})
                 for key, value in data.items():
                     setattr(timeline, key, value)
+                
+                session.flush()
+                # Auto-update project progress
+                project_id = timeline.project_id
+                total = session.query(func.count(ProjectTimeline.id)).filter_by(project_id=project_id).scalar()
+                if total and total > 0:
+                    completed = session.query(func.count(ProjectTimeline.id)).filter(
+                        ProjectTimeline.project_id == project_id,
+                        ProjectTimeline.status.ilike('%completed%')
+                    ).scalar()
+                    proj = session.query(Projects).filter_by(id=project_id).first()
+                    if proj:
+                        proj.progress = f"{int((completed / total) * 100)}%"
+
                 session.commit()
                 session.refresh(timeline)
                 return json.dumps(self.model_to_dict(timeline), indent=4, default=str)
@@ -840,7 +1166,24 @@ class DatabaseOperations:
                 timeline = session.query(ProjectTimeline).filter_by(id=timeline_id).first()
                 if not timeline:
                     return json.dumps({"error": "Timeline milestone not found"})
+                
+                project_id = timeline.project_id
                 session.delete(timeline)
+                session.flush()
+                
+                # Auto-update project progress
+                total = session.query(func.count(ProjectTimeline.id)).filter_by(project_id=project_id).scalar()
+                proj = session.query(Projects).filter_by(id=project_id).first()
+                if proj:
+                    if total and total > 0:
+                        completed = session.query(func.count(ProjectTimeline.id)).filter(
+                            ProjectTimeline.project_id == project_id,
+                            ProjectTimeline.status.ilike('%completed%')
+                        ).scalar()
+                        proj.progress = f"{int((completed / total) * 100)}%"
+                    else:
+                        proj.progress = "0%"
+
                 session.commit()
                 return json.dumps({"message": "Milestone deleted successfully"})
             except Exception as e:
@@ -898,3 +1241,227 @@ class DatabaseOperations:
             except Exception as e:
                 session.rollback()
                 return self._handle_error("edit_content_creator_task", e, context={"task_id": task_id})
+
+    # ==========================================
+    #             ATTENDANCE & LEAVES
+    # ==========================================
+    def check_in(self, employee_id: str, ip_address: str = None) -> str:
+        with self.SessionLocal() as session:
+            try:
+                now = datetime.now()
+                start_of_day = datetime.combine(now.date(), datetime.min.time())
+                end_of_day = datetime.combine(now.date(), datetime.max.time())
+                # Check if already checked in today
+                existing = session.query(Attendance).filter(
+                    Attendance.employee_id == employee_id,
+                    Attendance.date.between(start_of_day, end_of_day)
+                ).first()
+                
+                if existing:
+                    return json.dumps({"error": "Already checked in for today."})
+                
+                new_attendance = Attendance(
+                    employee_id=employee_id,
+                    check_in_time=datetime.now(),
+                    date=datetime.now(),
+                    status="Present",
+                    ip_address=ip_address
+                )
+
+                employee = session.query(Employees).filter_by(id=employee_id).first()
+                if not employee:
+                    return json.dumps({"error": "Employee not found."})
+                employee_name = employee.full_name
+                session.add(new_attendance)
+                session.commit()
+                session.refresh(new_attendance)
+                attendence_dict = self.model_to_dict(new_attendance)
+                attendence_dict['employee_name']=employee_name
+                return json.dumps(attendence_dict, indent=4, default=str)
+            except Exception as e:
+                session.rollback()
+                return self._handle_error("check_in", e)
+
+    def check_out(self, employee_id: str) -> str:
+        with self.SessionLocal() as session:
+            try:
+                now = datetime.now()
+                start_of_day = datetime.combine(now.date(), datetime.min.time())
+                end_of_day = datetime.combine(now.date(), datetime.max.time())
+                attendance = session.query(Attendance).filter(
+                    Attendance.employee_id == employee_id,
+                    Attendance.date.between(start_of_day, end_of_day)
+                ).first()
+                
+                if not attendance:
+                    return json.dumps({"error": "No check-in record found for today."})
+                
+                if attendance.check_out_time:
+                    return json.dumps({"error": "Already checked out for today."})
+                
+                attendance.check_out_time = datetime.now()
+                attendance.status = "Checked Out"
+                # Calculate total hours
+                time_diff = attendance.check_out_time - attendance.check_in_time
+                attendance.total_hours = time_diff.total_seconds() / 3600.0
+
+                session.commit()
+                session.refresh(attendance)
+                return json.dumps(self.model_to_dict(attendance), indent=4, default=str)
+            except Exception as e:
+                session.rollback()
+                return self._handle_error("check_out", e)
+
+    def get_all_attendance(self) -> str:
+        with self.SessionLocal() as session:
+            try:
+                records = session.query(Attendance).all()
+                return json.dumps([self.model_to_dict(r) for r in records], indent=4, default=str)
+            except Exception as e:
+                return self._handle_error("get_all_attendance", e)
+
+    # ==========================================
+    #          PROJECT PAYMENTS
+    # ==========================================
+
+    def add_project_payment(self, data: dict) -> str:
+        with self.SessionLocal() as session:
+            try:
+                new_payment = ProjectPayments(**data)
+                session.add(new_payment)
+                session.commit()
+                session.refresh(new_payment)
+                return json.dumps(self.model_to_dict(new_payment), indent=4, default=str)
+            except Exception as e:
+                session.rollback()
+                return self._handle_error("add_project_payment", e, context=data)
+
+    def get_project_payments(self, project_id: str) -> str:
+        with self.SessionLocal() as session:
+            try:
+                payments = session.query(ProjectPayments).filter_by(project_id=project_id).order_by(ProjectPayments.payment_date.desc()).all()
+                return json.dumps([self.model_to_dict(p) for p in payments], indent=4, default=str)
+            except Exception as e:
+                return self._handle_error("get_project_payments", e, context={"project_id": project_id})
+
+    def delete_project_payment(self, payment_id: str) -> str:
+        with self.SessionLocal() as session:
+            try:
+                payment = session.query(ProjectPayments).filter_by(id=payment_id).first()
+                if not payment:
+                    return json.dumps({"error": "Payment record not found."})
+                session.delete(payment)
+                session.commit()
+                return json.dumps({"message": "Payment record deleted successfully."})
+            except Exception as e:
+                session.rollback()
+                return self._handle_error("delete_project_payment", e, context={"payment_id": payment_id})
+
+    def get_employee_attendance(self, employee_id: str) -> str:
+        with self.SessionLocal() as session:
+            try:
+                records = session.query(Attendance).filter_by(employee_id=employee_id).all()
+                return json.dumps([self.model_to_dict(r) for r in records], indent=4, default=str)
+            except Exception as e:
+                return self._handle_error("get_employee_attendance", e)
+
+    def get_all_login_history(self) -> str:
+        with self.SessionLocal() as session:
+            try:
+                records = session.query(LoginHistory).all()
+                return json.dumps([self.model_to_dict(r) for r in records], indent=4, default=str)
+            except Exception as e:
+                return self._handle_error("get_all_login_history", e)
+
+    def get_all_leave_requests(self) -> str:
+        with self.SessionLocal() as session:
+            try:
+                records = session.query(LeaveRequest).all()
+                return json.dumps([self.model_to_dict(r) for r in records], indent=4, default=str)
+            except Exception as e:
+                return self._handle_error("get_all_leave_requests", e)
+
+    def create_leave_request(self, employee_id: str, start_date: str, end_date: str, reason: str) -> str:
+        with self.SessionLocal() as session:
+            try:
+                if isinstance(start_date, str):
+                    start_date = datetime.strptime(start_date, "%Y-%m-%d")
+                if isinstance(end_date, str):
+                    end_date = datetime.strptime(end_date, "%Y-%m-%d")
+                    
+                new_request = LeaveRequest(
+                    employee_id=employee_id,
+                    start_date=start_date,
+                    end_date=end_date,
+                    reason=reason,
+                    status="Pending"
+                )
+                session.add(new_request)
+                session.commit()
+                session.refresh(new_request)
+                return json.dumps(self.model_to_dict(new_request), indent=4, default=str)
+            except Exception as e:
+                session.rollback()
+                return self._handle_error("create_leave_request", e)
+
+    def get_employee_leave_requests(self, employee_id: str) -> str:
+        with self.SessionLocal() as session:
+            try:
+                records = session.query(LeaveRequest).filter_by(employee_id=employee_id).all()
+                return json.dumps([self.model_to_dict(r) for r in records], indent=4, default=str)
+            except Exception as e:
+                return self._handle_error("get_employee_leave_requests", e)
+
+    def update_leave_request_status(self, leave_id: str, status: str) -> str:
+        with self.SessionLocal() as session:
+            try:
+                record = session.query(LeaveRequest).filter_by(id=leave_id).first()
+                if not record:
+                    return json.dumps({"error": "Leave request not found."})
+                record.status = status
+                session.commit()
+                session.refresh(record)
+                return json.dumps(self.model_to_dict(record), indent=4, default=str)
+            except Exception as e:
+                session.rollback()
+                return self._handle_error("update_leave_request_status", e)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

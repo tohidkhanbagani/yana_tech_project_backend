@@ -9,25 +9,37 @@ frontend/
 src/database/database_testing.ipynb
 testing.ipynb
 seed_admin.py
-frontend_2/
-# IDE stuff
-.vscode/
-.idea/
-
-platform_frontend/
-
 # Database & Data (IMPORTANT: Don't upload your local test data)
-# data/database/
+data/database/
 *.db
 *.sqlite3
 dump/
+big_change_backup/
+
+
 # data/images/
-# data/uploads/
+data/uploads/
 
 # Environment/Config
 .env
 ngrok.yml
 
+context.txt
+context2.txt
+scratch
+.docx
+.pdf
+.js
+.ipynb
+.csv
+.xlsx
+
 # OS stuff
 .DS_Store
 Thumbs.db
+
+frontend_2/                                                                                                                                     │
+# IDE stuff                                                                                                                                     │
+.vscode/                                                                                                                                        │
+.idea/                                                                                                                                                 │
+platform_frontend/                                                                                                                              │
