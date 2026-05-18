@@ -16,7 +16,7 @@ data/database/
 dump/
 big_change_backup/
 
-
+# src/database/database_create.py
 # data/images/
 data/uploads/
 
