@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 import logging
-from sqlalchemy import func, desc, or_, and_, case
+from sqlalchemy import func, desc, or_, and_, case, extract
 from datetime import datetime, timedelta, time
 
 from src.database.database_create import SessionLocal
@@ -683,9 +683,9 @@ def get_v2_dashboard_summary(current_user: dict = Depends(get_current_user)):
             # Helper for monthly aggregation
             def get_monthly_stats(model, date_col, amount_col):
                 return session.query(
-                    func.extract('month', date_col).label('month'),
+                    extract('month', date_col).label('month'),
                     func.sum(amount_col).label('total')
-                ).filter(func.extract('year', date_col) == current_year)\
+                ).filter(extract('year', date_col) == current_year)\
                  .group_by('month').all()
 
             monthly_rev_dev = get_monthly_stats(DeveloperTasks, DeveloperTasks.date, DeveloperTasks.billing_amount)
@@ -693,7 +693,7 @@ def get_v2_dashboard_summary(current_user: dict = Depends(get_current_user)):
             
             monthly_cost_dev = get_monthly_stats(DeveloperTasks, DeveloperTasks.date, DeveloperTasks.employee_cost)
             monthly_cost_content = get_monthly_stats(ContentCreatorTasks, ContentCreatorTasks.date, ContentCreatorTasks.employee_cost)
-             
+            
             # Monthly Expenses
             monthly_exp_raw = session.query(
                 func.substr(ProjectExpenses.expense_date, 6, 2).label('month'),
