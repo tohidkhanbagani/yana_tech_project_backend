@@ -693,7 +693,7 @@ def get_v2_dashboard_summary(current_user: dict = Depends(get_current_user)):
             
             monthly_cost_dev = get_monthly_stats(DeveloperTasks, DeveloperTasks.date, DeveloperTasks.employee_cost)
             monthly_cost_content = get_monthly_stats(ContentCreatorTasks, ContentCreatorTasks.date, ContentCreatorTasks.employee_cost)
-            
+             
             # Monthly Expenses
             monthly_exp_raw = session.query(
                 func.substr(ProjectExpenses.expense_date, 6, 2).label('month'),
