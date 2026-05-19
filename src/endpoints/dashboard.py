@@ -737,7 +737,7 @@ def get_v2_dashboard_summary(current_user: dict = Depends(get_current_user)):
             for d, p in dept_pl_query_dev: dept_pl[d] = dept_pl.get(d, 0) + float(p or 0)
             for d, p in dept_pl_query_content: dept_pl[d] = dept_pl.get(d, 0) + float(p or 0)
 
-            # 4. Project Tracking (Optimized Bulk Query)
+            # 4. Project Tracking (Optimized Bulk Query) 
             project_stats_dev = {row.project_id: (float(row.cost or 0), float(row.billed or 0)) for row in session.query(
                 DeveloperTasks.project_id,
                 func.sum(DeveloperTasks.employee_cost).label('cost'),
