@@ -1,0 +1,23 @@
+theres some unused fields in the projects table that is the :-
+
+description, referred_by, filled_by ,assigned_to, team, approx_cost, 
+now i want you to investigate and see why these arent being used and see whats the matter and 
+find a real usefull place for these columns to be usefull id not then leave them be as they were
+earlier but do use the project description column investigate and see whats the matter
+
+
+why isnt the description field being used in the project 
+create modal investigate and see whats the mater
+
+well i dont that theres project manager right in the project modal and also a budget field right so 
+why did there is any approx cost and primary lead and execution team and why isnt the description 
+being shown in the project details section please investigate and see whats the matter
+
+
+no but i dint understoof that why theres a primary lead, approx cost and execution team whats the 
+purpose of these fields as theres already manager whom the project is assigned and budget field where 
+the budget is allocated for the whole project and then team and assignments field where the teams are 
+created so whats the need for these fields investigate and see whats the matter and inform me because 
+i dont see any practical usage of these fields
+
+

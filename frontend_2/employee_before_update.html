@@ -1,0 +1,966 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Yana OS | Employee Workspace</title>
+    
+    <!-- Google Fonts: Inter -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: { sans: ['Inter', 'sans-serif'] },
+                    colors: {
+                        brand: {
+                            dark: '#0f172a',    primary: '#4f46e5',
+                            accent: '#10b981',  alert: '#f43f5e',
+                            surface: '#f8fafc'
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #f8fafc; overflow-x: hidden; }
+        .input-field { transition: all 0.3s ease; }
+        .input-field:focus { box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.2); border-color: #4f46e5; }
+        
+        @keyframes slideInRight { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+        @keyframes fadeOut { from { opacity: 1; } to { opacity: 0; } }
+        .toast-enter { animation: slideInRight 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+        .toast-exit { animation: fadeOut 0.4s ease forwards; }
+
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: #f1f1f1; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+    </style>
+</head>
+<body class="text-slate-800 antialiased h-screen w-screen overflow-hidden">
+
+    <!-- Toast Notification Container -->
+    <div id="toast-container" class="fixed top-4 right-4 z-50 flex flex-col gap-2 w-full max-w-sm pointer-events-none"></div>
+
+    <!-- Global Modal -->
+    <div id="globalModal" class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
+        <div class="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh]">
+            <div class="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50 shrink-0">
+                <h3 id="modalTitle" class="text-lg font-bold text-slate-800 tracking-tight"></h3>
+                <button onclick="closeModal()" class="text-slate-400 hover:text-slate-600 transition-colors p-1 rounded-lg"><i data-lucide="x" class="w-5 h-5"></i></button>
+            </div>
+            <div id="modalBody" class="p-6 overflow-y-auto"></div>
+        </div>
+    </div>
+
+    <!-- Main SPA Mount Point -->
+    <div id="app" class="h-full w-full"></div>
+
+    <script>
+        /**
+         * YANA OS - EMPLOYEE PORTAL ENGINE
+         */
+
+        const CONFIG = {
+            API_BASE_URL: 'http://localhost:8000', 
+            TOKEN_KEY: 'yana_os_token',
+            LOGIN_URL: 'login.html'
+        };
+
+        const state = {
+            user: null,
+            currentView: 'dashboard',
+            employeeData: null,
+            employeeTasks: [],
+            projects: [],
+            isEditingProfile: false, // Tracks edit mode
+            editSkills: [], // Stores skills tags during editing
+            devTechStack: [] // Stores tech stack tags for dev task
+        };
+
+        // --- Utilities ---
+        function showToast(message, type = 'info') {
+            const container = document.getElementById('toast-container');
+            const toast = document.createElement('div');
+            let iconSvg = ''; let bgColor = '';
+            
+            if (type === 'error') { bgColor = 'bg-brand-alert'; iconSvg = `<i data-lucide="alert-circle" class="w-5 h-5 text-white"></i>`; } 
+            else if (type === 'success') { bgColor = 'bg-brand-accent'; iconSvg = `<i data-lucide="check-circle-2" class="w-5 h-5 text-white"></i>`; } 
+            else { bgColor = 'bg-slate-800'; iconSvg = `<i data-lucide="info" class="w-5 h-5 text-white"></i>`; }
+
+            toast.className = `toast-enter flex items-center p-4 rounded-lg shadow-lg text-white pointer-events-auto ${bgColor}`;
+            toast.innerHTML = `<div class="mr-3">${iconSvg}</div><div class="font-medium text-sm flex-1">${message}</div><button onclick="this.parentElement.remove()" class="ml-4 opacity-80 hover:opacity-100"><i data-lucide="x" class="w-4 h-4"></i></button>`;
+            container.appendChild(toast);
+            lucide.createIcons();
+            setTimeout(() => { toast.classList.remove('toast-enter'); toast.classList.add('toast-exit'); setTimeout(() => toast.remove(), 400); }, 4000);
+        }
+
+        function parseJwt(token) {
+            try {
+                const base64Url = token.split('.')[1];
+                const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+                const jsonPayload = decodeURIComponent(atob(base64).split('').map(c => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2)).join(''));
+                return JSON.parse(jsonPayload);
+            } catch (e) { return null; }
+        }
+
+        // --- Modals ---
+        function openModal(title, content) {
+            const m = document.getElementById('globalModal');
+            if(m) {
+                document.getElementById('modalTitle').innerText = title;
+                document.getElementById('modalBody').innerHTML = content;
+                m.classList.remove('hidden');
+                lucide.createIcons();
+            }
+        }
+        function closeModal() {
+            const m = document.getElementById('globalModal');
+            if(m) m.classList.add('hidden');
+        }
+
+        async function apiFetch(endpoint, options = {}) {
+            const token = sessionStorage.getItem(CONFIG.TOKEN_KEY);
+            const headers = { ...options.headers };
+            if (token) headers['Authorization'] = `Bearer ${token}`;
+            if (!headers['Content-Type'] && !(options.body instanceof FormData) && typeof options.body !== 'string') {
+                headers['Content-Type'] = 'application/json';
+                if (options.body) options.body = JSON.stringify(options.body);
+            }
+
+            try {
+                const response = await fetch(`${CONFIG.API_BASE_URL}${endpoint}`, { ...options, headers });
+                if (response.status === 401) { logout(false); throw new Error("Session expired."); }
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(data.detail || data.error || data.critical_error || "An unexpected error occurred.");
+                return data;
+            } catch (error) {
+                if(error.message === "Failed to fetch") showToast("Unable to connect to the server.", "error");
+                throw error;
+            }
+        }
+
+        function logout(showNotification = true) {
+            sessionStorage.removeItem(CONFIG.TOKEN_KEY);
+            if (showNotification) alert("Logged out successfully");
+            window.location.href = CONFIG.LOGIN_URL;
+        }
+
+        // --- Data Loaders ---
+        async function loadEmployeeWorkspaceData() {
+            try {
+                const [projects, tasks, profile] = await Promise.all([
+                    apiFetch(`/projects/employee/${state.user.id}`).catch(() => []),
+                    apiFetch(`/tasks/get_by_employee/${state.user.id}`).catch(() => []),
+                    apiFetch(`/employees/get/${state.user.id}`).catch(() => ({}))
+                ]);
+
+                state.projects = Array.isArray(projects) ? projects : [];                state.employeeTasks = Array.isArray(tasks) ? tasks : [];
+                state.employeeData = profile && !profile.error ? profile : {};
+            } catch (error) {
+                showToast("Failed to load workspace data: " + error.message, "error");
+            }
+        }
+
+        // --- Routing Engine ---
+        async function routeApp(view = null) {
+            if (view) state.currentView = view;
+            
+            const appDiv = document.getElementById('app');
+
+            if (!state.employeeData) {
+                appDiv.innerHTML = `
+                    <div class="h-full w-full flex items-center justify-center bg-slate-50">
+                        <div class="flex flex-col items-center">
+                            <i data-lucide="loader-2" class="w-10 h-10 animate-spin text-brand-primary mb-4"></i>
+                            <p class="text-slate-500 font-medium">Loading Workspace...</p>
+                        </div>
+                    </div>
+                `;
+                lucide.createIcons();
+                await loadEmployeeWorkspaceData();
+            }
+            renderEmployeeApp();
+        }
+
+        // --- UI Rendering ---
+        function renderEmployeeApp() {
+            const appDiv = document.getElementById('app');
+            
+            let contentHtml = '';
+            if (state.currentView === 'dashboard') contentHtml = getEmployeeDashboardTemplate();
+            else if (state.currentView === 'log-dev') contentHtml = getDevTaskFormTemplate();
+            else if (state.currentView === 'log-content') contentHtml = getContentTaskFormTemplate();
+            else if (state.currentView === 'profile') contentHtml = getEmployeeProfileTemplate();
+
+            appDiv.innerHTML = `
+                <div class="flex h-full w-full bg-slate-50 overflow-hidden">
+                    <!-- Sidebar -->
+                    <aside class="w-64 bg-brand-dark text-slate-300 flex flex-col shrink-0 transition-all z-20 hidden md:flex">
+                        <div class="h-16 flex items-center px-6 bg-slate-900 border-b border-slate-800 shrink-0">
+                            <div class="w-8 h-8 bg-brand-primary rounded-md flex items-center justify-center mr-3 shadow-lg">
+                                <i data-lucide="layers" class="text-white w-5 h-5"></i>
+                            </div>
+                            <span class="font-bold text-white text-lg tracking-tight">Yana OS</span>
+                        </div>
+                        <nav class="flex-1 px-4 py-6 space-y-2 overflow-y-auto">
+                            <button onclick="routeApp('dashboard')" class="w-full flex items-center px-4 py-3 rounded-xl transition-all ${state.currentView === 'dashboard' ? 'bg-brand-primary text-white shadow-md' : 'hover:bg-slate-800 hover:text-white'}">
+                                <i data-lucide="layout-dashboard" class="w-5 h-5 mr-3"></i> <span class="font-medium">Dashboard</span>
+                            </button>
+                            <button onclick="routeApp('profile')" class="w-full flex items-center px-4 py-3 rounded-xl transition-all ${state.currentView === 'profile' ? 'bg-brand-primary text-white shadow-md' : 'hover:bg-slate-800 hover:text-white'}">
+                                <i data-lucide="user" class="w-5 h-5 mr-3"></i> <span class="font-medium">My Profile</span>
+                            </button>
+                        </nav>
+                        <div class="p-4 border-t border-slate-800">
+                            <button onclick="logout()" class="w-full flex items-center px-4 py-3 rounded-xl hover:bg-brand-alert hover:text-white transition-all group">
+                                <i data-lucide="log-out" class="w-5 h-5 mr-3 group-hover:text-white text-slate-400 transition-colors"></i> <span class="font-medium">Logout</span>
+                            </button>
+                        </div>
+                    </aside>
+
+                    <!-- Main Content -->
+                    <div class="flex-1 flex flex-col overflow-hidden relative">
+                        <header class="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-6 md:px-8 shrink-0 z-10 shadow-sm">
+                            <div class="flex items-center gap-3">
+                                <button class="md:hidden text-slate-500 hover:text-brand-primary">
+                                    <i data-lucide="menu" class="w-6 h-6"></i>
+                                </button>
+                                <h2 class="text-xl font-bold text-slate-800 tracking-tight capitalize">${state.currentView.replace('-', ' ')}</h2>
+                            </div>
+                            <div class="flex items-center gap-4">
+                                <div class="w-8 h-8 rounded-full bg-indigo-100 text-brand-primary flex items-center justify-center font-bold shadow-sm">
+                                    ${state.user.sub.charAt(0).toUpperCase()}
+                                </div>
+                                <span class="font-medium text-slate-700 hidden sm:inline-block">${state.user.sub}</span>
+                            </div>
+                        </header>
+                        
+                        <main class="flex-1 overflow-y-auto p-4 md:p-8">
+                            <div class="max-w-5xl mx-auto">
+                                ${contentHtml}
+                            </div>
+                        </main>
+                    </div>
+                </div>
+            `;
+            lucide.createIcons();
+        }
+
+        // --- View Templates ---
+        function getEmployeeDashboardTemplate() {
+            const now = new Date();
+            const startOfWeek = new Date(now.setDate(now.getDate() - now.getDay()));
+            startOfWeek.setHours(0,0,0,0);
+
+            let hoursThisWeek = 0;
+            let contentThisWeek = 0;
+
+            const recentTasksHtml = state.employeeTasks.slice().reverse().slice(0, 5).map(task => {
+                const dateLabel = new Date(task.date || task.created_at).toLocaleDateString();
+                const projectLabel = task.project_id ? (state.projects.find(p => p.id === task.project_id)?.name || 'Project Attached') : 'General Task';
+                const metricLabel = task.task_type === 'developer' ? `${task.hours_logged} hrs` : `${task.total_content} items`;
+                
+                return `
+                    <div class="flex items-center justify-between p-4 border-b border-slate-100 last:border-0 hover:bg-slate-50 transition-colors">
+                        <div>
+                            <p class="font-semibold text-slate-800 line-clamp-1">${task.task_performed || 'Task Executed'}</p>
+                            <p class="text-xs text-slate-500 mt-1">${dateLabel} &bull; ${projectLabel}</p>
+                        </div>
+                        <div class="text-right shrink-0 ml-4">
+                            <span class="inline-block px-3 py-1 bg-indigo-50 text-brand-primary text-xs font-bold rounded-full">
+                                ${metricLabel}
+                            </span>
+                        </div>
+                    </div>
+                `;
+            }).join('') || '<p class="p-6 text-slate-500 text-center text-sm">No recent activity found. Start logging your work above.</p>';
+
+            state.employeeTasks.forEach(task => {
+                const taskDate = new Date(task.date || task.created_at);
+                if (taskDate >= startOfWeek) {
+                    if (task.task_type === 'developer' || task.hours_logged) hoursThisWeek += parseFloat(task.hours_logged || 0);
+                    if (task.task_type === 'content_creator') contentThisWeek += parseInt(task.total_content || 0);
+                }
+            });
+
+            return `
+                <div class="mb-8 mt-2">
+                    <h3 class="text-2xl md:text-3xl font-bold text-slate-800 mb-2">Welcome back, ${state.employeeData?.full_name || state.user.sub}</h3>
+                    <p class="text-slate-500">Here is your workspace overview for the week.</p>
+                </div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 md:gap-6 mb-8 md:mb-10">
+                    <div class="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm flex items-center">
+                        <div class="w-12 h-12 md:w-14 md:h-14 bg-indigo-50 rounded-xl flex items-center justify-center mr-4 md:mr-5 shrink-0">
+                            <i data-lucide="clock" class="w-6 h-6 md:w-7 md:h-7 text-brand-primary"></i>
+                        </div>
+                        <div>
+                            <p class="text-xs md:text-sm text-slate-500 font-medium mb-1">Hours Logged (This Week)</p>
+                            <h4 class="text-2xl md:text-3xl font-bold text-slate-800">${hoursThisWeek.toFixed(1)}</h4>
+                        </div>
+                    </div>
+                    <div class="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm flex items-center">
+                        <div class="w-12 h-12 md:w-14 md:h-14 bg-emerald-50 rounded-xl flex items-center justify-center mr-4 md:mr-5 shrink-0">
+                            <i data-lucide="image" class="w-6 h-6 md:w-7 md:h-7 text-brand-accent"></i>
+                        </div>
+                        <div>
+                            <p class="text-xs md:text-sm text-slate-500 font-medium mb-1">Content Generated (This Week)</p>
+                            <h4 class="text-2xl md:text-3xl font-bold text-slate-800">${contentThisWeek}</h4>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flex items-center justify-between mb-4">
+                    <h4 class="text-lg font-bold text-slate-800">Log Your Work</h4>
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6 mb-10">
+                    <button onclick="routeApp('log-dev')" class="group text-left bg-white border border-slate-200 hover:border-brand-primary rounded-2xl p-5 md:p-6 shadow-sm hover:shadow-md transition-all">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="w-10 h-10 md:w-12 md:h-12 bg-slate-50 group-hover:bg-indigo-50 rounded-xl flex items-center justify-center transition-colors">
+                                <i data-lucide="terminal" class="w-5 h-5 md:w-6 md:h-6 text-slate-600 group-hover:text-brand-primary"></i>
+                            </div>
+                            <i data-lucide="arrow-right" class="w-5 h-5 text-slate-400 group-hover:text-brand-primary transform group-hover:translate-x-1 transition-all"></i>
+                        </div>
+                        <h5 class="text-lg md:text-xl font-bold text-slate-800 mb-1 md:mb-2">Engineering Task</h5>
+                        <p class="text-xs md:text-sm text-slate-500">Log dev hours, tech stack, and GitHub commits.</p>
+                    </button>
+
+                    <button onclick="routeApp('log-content')" class="group text-left bg-white border border-slate-200 hover:border-brand-primary rounded-2xl p-5 md:p-6 shadow-sm hover:shadow-md transition-all">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="w-10 h-10 md:w-12 md:h-12 bg-slate-50 group-hover:bg-indigo-50 rounded-xl flex items-center justify-center transition-colors">
+                                <i data-lucide="video" class="w-5 h-5 md:w-6 md:h-6 text-slate-600 group-hover:text-brand-primary"></i>
+                            </div>
+                            <i data-lucide="arrow-right" class="w-5 h-5 text-slate-400 group-hover:text-brand-primary transform group-hover:translate-x-1 transition-all"></i>
+                        </div>
+                        <h5 class="text-lg md:text-xl font-bold text-slate-800 mb-1 md:mb-2">Content Task</h5>
+                        <p class="text-xs md:text-sm text-slate-500">Log reels, videos, posters, and engagement metrics.</p>
+                    </button>
+                </div>
+
+                <div class="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden mb-8">
+                    <div class="px-6 py-4 border-b border-slate-100 bg-slate-50 flex items-center gap-2">
+                        <i data-lucide="history" class="w-5 h-5 text-slate-500"></i>
+                        <h4 class="font-bold text-slate-800">Recent Submissions</h4>
+                    </div>
+                    <div class="flex flex-col divide-y divide-slate-100">
+                        ${recentTasksHtml}
+                    </div>
+                </div>
+            `;
+        }
+
+        function getProjectOptions() {
+            return '<option value="">-- General / No Project --</option>' + 
+                   state.projects.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
+        }
+
+        function getDevTaskFormTemplate() {
+            return `
+                <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 md:p-8 max-w-3xl mx-auto mt-2">
+                    <div class="flex flex-col sm:flex-row sm:items-center gap-4 mb-8 pb-6 border-b border-slate-100">
+                        <button onclick="routeApp('dashboard')" class="w-10 h-10 rounded-full hover:bg-slate-100 flex items-center justify-center text-slate-500 transition-colors shrink-0">
+                            <i data-lucide="arrow-left" class="w-5 h-5"></i>
+                        </button>
+                        <div>
+                            <h3 class="text-xl md:text-2xl font-bold text-slate-800">Log Engineering Task</h3>
+                        </div>
+                    </div>
+                    
+                    <form onsubmit="handleTaskSubmit(event, 'developer')" class="space-y-6">
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                            <div>
+                                <label class="block text-sm font-semibold text-slate-700 mb-2">Project</label>
+                                <select id="dev-project" class="input-field w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl outline-none">
+                                    ${getProjectOptions()}
+                                </select>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-semibold text-slate-700 mb-2">Hours Logged <span class="text-brand-alert">*</span></label>
+                                <input type="number" id="dev-hours" required min="0.5" max="24" step="0.5" class="input-field w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl outline-none">
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                            <div>
+                                <label class="block text-sm font-semibold text-slate-700 mb-2">Tech Stack Used</label>
+                                <input type="text" id="dev-tech-input" onkeydown="handleDevTechKeydown(event)" class="input-field w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl outline-none" placeholder="Type language/tool and press Enter">
+                                <div id="dev_tech_container" class="flex flex-wrap gap-2 mt-3 mb-1"></div>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-semibold text-slate-700 mb-2">GitHub Link</label>
+                                <input type="url" id="dev-link" class="input-field w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl outline-none">
+                            </div>
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-semibold text-slate-700 mb-2">Task Performed <span class="text-brand-alert">*</span></label>
+                            <textarea id="dev-task" required rows="3" class="input-field w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl outline-none resize-none"></textarea>
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-semibold text-slate-700 mb-2">Plan for Tomorrow</label>
+                            <textarea id="dev-plan" rows="2" class="input-field w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl outline-none resize-none"></textarea>
+                        </div>
+
+                        <div class="pt-6 border-t border-slate-100 flex justify-end">
+                            <button type="submit" id="btn-submit-dev" class="w-full sm:w-auto bg-brand-primary hover:bg-indigo-700 text-white font-medium py-3 px-8 rounded-xl shadow-md transition-all flex items-center justify-center">
+                                <span>Submit Timesheet</span><i data-lucide="check" class="ml-2 w-5 h-5"></i>
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            `;
+        }
+
+        function getContentTaskFormTemplate() {
+            return `
+                <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 md:p-8 max-w-3xl mx-auto mt-2">
+                    <div class="flex flex-col sm:flex-row sm:items-center gap-4 mb-8 pb-6 border-b border-slate-100">
+                        <button onclick="routeApp('dashboard')" class="w-10 h-10 rounded-full hover:bg-slate-100 flex items-center justify-center text-slate-500 transition-colors shrink-0">
+                            <i data-lucide="arrow-left" class="w-5 h-5"></i>
+                        </button>
+                        <div>
+                            <h3 class="text-xl md:text-2xl font-bold text-slate-800">Log Content Task</h3>
+                        </div>
+                    </div>
+                    
+                    <form onsubmit="handleTaskSubmit(event, 'content')" class="space-y-6">
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                            <div>
+                                <label class="block text-sm font-semibold text-slate-700 mb-2">Project</label>
+                                <select id="con-project" class="input-field w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl outline-none">
+                                    ${getProjectOptions()}
+                                </select>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-semibold text-slate-700 mb-2">Hours Logged <span class="text-brand-alert">*</span></label>
+                                <input type="number" id="con-hours" required min="0.5" max="24" step="0.5" class="input-field w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl outline-none">
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 bg-slate-50 p-4 md:p-6 rounded-xl border border-slate-100">
+                            <div><label class="block text-xs uppercase tracking-wider font-bold text-slate-500 mb-2 text-center">Reels</label><input type="number" id="con-reels" min="0" value="0" class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg text-center outline-none"></div>
+                            <div><label class="block text-xs uppercase tracking-wider font-bold text-slate-500 mb-2 text-center">Videos</label><input type="number" id="con-videos" min="0" value="0" class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg text-center outline-none"></div>
+                            <div><label class="block text-xs uppercase tracking-wider font-bold text-slate-500 mb-2 text-center">Posters</label><input type="number" id="con-posters" min="0" value="0" class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg text-center outline-none"></div>
+                            <div><label class="block text-xs uppercase tracking-wider font-bold text-slate-500 mb-2 text-center">Calls</label><input type="number" id="con-calls" min="0" value="0" class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg text-center outline-none"></div>
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-semibold text-slate-700 mb-2">Target Platform</label>
+                            <input type="text" id="con-platform" class="input-field w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl outline-none">
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-semibold text-slate-700 mb-2">Task Performed <span class="text-brand-alert">*</span></label>
+                            <textarea id="con-task" required rows="3" class="input-field w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl outline-none resize-none"></textarea>
+                        </div>
+
+                        <div class="pt-6 border-t border-slate-100 flex justify-end">
+                            <button type="submit" id="btn-submit-con" class="w-full sm:w-auto bg-brand-primary hover:bg-indigo-700 text-white font-medium py-3 px-8 rounded-xl shadow-md transition-all flex items-center justify-center">
+                                <span>Submit Content Output</span><i data-lucide="check" class="ml-2 w-5 h-5"></i>
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            `;
+        }
+
+        function getEmployeeProfileTemplate() {
+            const emp = state.employeeData || {};
+            const isEdit = state.isEditingProfile;
+
+            // Helper to render static text or input field
+            const val = (k) => emp[k] && emp[k] !== 'N/A' ? emp[k] : '';
+            const txt = (k) => emp[k] && emp[k] !== 'N/A' ? emp[k] : '<span class="text-slate-300 italic font-normal">Not provided</span>';
+
+            const input = (id, label, key, type="text", placeholder="") => `
+                <div class="flex flex-col">
+                    <label class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">${label}</label>
+                    ${isEdit 
+                        ? `<input type="${type}" id="edit_${id}" value="${val(key)}" class="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-slate-800 text-sm outline-none focus:border-brand-primary focus:ring-1 focus:ring-brand-primary transition-all shadow-sm" placeholder="${placeholder || 'Enter ' + label}">` 
+                        : `<div class="text-sm font-semibold text-slate-800 py-1 border-b border-transparent min-h-[32px]">${txt(key)}</div>`
+                    }
+                </div>
+            `;
+
+            const genderSelect = `
+                <div class="flex flex-col">
+                    <label class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Gender</label>
+                    ${isEdit
+                        ? `<select id="edit_gender" class="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-slate-800 text-sm outline-none focus:border-brand-primary focus:ring-1 focus:ring-brand-primary transition-all shadow-sm">
+                            <option value="Male" ${val('gender')==='Male'?'selected':''}>Male</option>
+                            <option value="Female" ${val('gender')==='Female'?'selected':''}>Female</option>
+                            <option value="Other" ${val('gender')==='Other'?'selected':''}>Other</option>
+                            <option value="N/A" ${!val('gender')?'selected':''}>Not Specified</option>
+                           </select>`
+                        : `<div class="text-sm font-semibold text-slate-800 py-1 border-b border-transparent min-h-[32px]">${txt('gender')}</div>`
+                    }
+                </div>
+            `;
+
+            return `
+                <div class="max-w-5xl mx-auto pb-10">
+                    <form onsubmit="handleProfileSave(event)">
+                        <!-- Top Banner & Action Bar -->
+                        <div class="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden mb-6 relative">
+                            <div class="h-32 bg-gradient-to-r from-slate-800 to-slate-900 relative"></div>
+                            
+                            <div class="absolute top-4 right-4 z-10 flex gap-2">
+                                ${isEdit ? `
+                                    <button type="button" onclick="toggleEditProfile()" class="px-4 py-2 bg-white/10 hover:bg-white/20 backdrop-blur border border-white/20 text-white text-sm font-medium rounded-lg transition-colors">Cancel</button>
+                                    <button type="submit" id="saveProfileBtn" class="px-4 py-2 bg-brand-accent hover:bg-emerald-600 text-white text-sm font-medium rounded-lg shadow-lg transition-colors flex items-center shadow-emerald-500/20"><i data-lucide="save" class="w-4 h-4 mr-2"></i> Save Changes</button>
+                                ` : `
+                                    <button type="button" onclick="openChangePasswordModal()" class="px-4 py-2 bg-white/10 hover:bg-white/20 backdrop-blur border border-white/20 text-[13px] font-medium rounded-lg shadow-sm transition-colors flex items-center text-rose-50 hover:text-white border-rose-300/30 hover:border-rose-300/50 hover:bg-rose-500/20"><i data-lucide="key" class="w-4 h-4 mr-2"></i> Password</button>
+                                    <button type="button" onclick="toggleEditProfile()" class="px-4 py-2 bg-white/10 hover:bg-white/20 backdrop-blur border border-white/20 text-white text-[13px] font-medium rounded-lg shadow-sm transition-colors flex items-center"><i data-lucide="edit-3" class="w-4 h-4 mr-2"></i> Edit Profile</button>
+                                `}
+                            </div>
+
+                            <div class="px-6 pb-6 md:px-8 relative">
+                                <div class="absolute -top-16 left-6 md:left-8 w-28 h-28 bg-white rounded-full p-1.5 shadow-lg border border-slate-100">
+                                    <div class="w-full h-full bg-slate-100 rounded-full flex items-center justify-center overflow-hidden relative group">
+                                        ${emp.photo && emp.photo !== 'N/A' ? `<img src="${CONFIG.API_BASE_URL}/${emp.photo}" class="w-full h-full object-cover">` : `<i data-lucide="user" class="w-12 h-12 text-slate-400"></i>`}
+                                        <div class="absolute inset-0 bg-black/60 hidden group-hover:flex items-center justify-center cursor-pointer transition-all">
+                                            <label for="upload-profile" class="cursor-pointer text-white text-xs font-bold w-full h-full flex flex-col items-center justify-center"><i data-lucide="camera" class="w-5 h-5 mb-1"></i> Update</label>
+                                            <input type="file" id="upload-profile" class="hidden" accept="image/*" onchange="handleFileUpload(event, 'profile', 'profile')">
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="pt-14 flex justify-between items-end">
+                                    <div>
+                                        <h2 class="text-2xl md:text-3xl font-black text-slate-800 tracking-tight">${emp.full_name || 'N/A'}</h2>
+                                        <p class="text-brand-primary font-bold text-sm tracking-wide uppercase mt-0.5">${emp.department || 'Employee'} &bull; @${emp.username}</p>
+                                    </div>
+                                    <div class="text-right hidden sm:block">
+                                        <div class="inline-flex items-center px-3 py-1 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs font-bold uppercase tracking-wider">
+                                            <span class="w-2 h-2 rounded-full bg-emerald-500 mr-2 animate-pulse"></span> Active
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-1 xl:grid-cols-3 gap-6">
+                            <!-- Left Column: Personal & Emergency -->
+                            <div class="space-y-6 xl:col-span-1">
+                                <!-- Personal Info Card -->
+                                <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
+                                    <h3 class="text-sm font-black text-slate-800 uppercase tracking-wider mb-5 flex items-center"><i data-lucide="user-circle" class="w-4 h-4 mr-2 text-brand-primary"></i> Personal Identity</h3>
+                                    <div class="space-y-4">
+                                        ${input('full_name', 'Full Legal Name', 'full_name')}
+                                        ${input('fathers_name', "Father's Name", 'fathers_name')}
+                                        <div class="grid grid-cols-2 gap-4">
+                                            ${input('date_of_birth', 'Date of Birth', 'date_of_birth', 'date')}
+                                            ${genderSelect}
+                                        </div>
+                                        ${input('address', 'Permanent Address', 'address')}
+                                    </div>
+                                </div>
+
+                                <!-- Contact Info Card -->
+                                <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
+                                    <h3 class="text-sm font-black text-slate-800 uppercase tracking-wider mb-5 flex items-center"><i data-lucide="phone-call" class="w-4 h-4 mr-2 text-brand-primary"></i> Contact Data</h3>
+                                    <div class="space-y-4">
+                                        ${input('contact_number', 'Primary Phone', 'contact_number', 'tel')}
+                                        ${input('alternate_contact', 'Alternate Phone', 'alternate_contact', 'tel')}
+                                        ${input('email', 'Primary Email', 'email', 'email')}
+                                        ${input('alternate_email', 'Alternate Email', 'alternate_email', 'email')}
+                                    </div>
+                                </div>
+
+                                <!-- Emergency Card -->
+                                <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 border-t-4 border-t-rose-400">
+                                    <h3 class="text-sm font-black text-slate-800 uppercase tracking-wider mb-5 flex items-center"><i data-lucide="heart-pulse" class="w-4 h-4 mr-2 text-rose-500"></i> Emergency Contact</h3>
+                                    <div class="space-y-4">
+                                        ${input('emergency_contact', 'Contact Name & Number', 'emergency_contact', 'text', 'e.g. Jane Doe - 9876543210')}
+                                        ${input('relationship_with_emergency_contact', 'Relationship', 'relationship_with_emergency_contact', 'text', 'e.g. Spouse, Parent')}
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Right Column: Professional, Bank & Compliance -->
+                            <div class="space-y-6 xl:col-span-2">
+                                <!-- Professional & Experience Card -->
+                                <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
+                                    <h3 class="text-sm font-black text-slate-800 uppercase tracking-wider mb-5 flex items-center"><i data-lucide="briefcase" class="w-4 h-4 mr-2 text-brand-primary"></i> Corporate & Experience</h3>
+                                    
+                                    <div class="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4 mb-6 pb-6 border-b border-slate-100">
+                                        ${input('date_of_joining', 'Date of Joining', 'date_of_joining', 'date')}
+                                        ${input('reporting_manager', 'Reporting Manager', 'reporting_manager')}
+                                        ${input('highest_qualification', 'Highest Qualification', 'highest_qualification')}
+                                        ${input('specialization', 'Specialization / Major', 'specialization')}
+                                    </div>
+                                    
+                                    <div class="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4 mb-6 pb-6 border-b border-slate-100">
+                                        ${input('experience', 'Total Experience', 'experience', 'text', 'e.g. 4 Years')}
+                                        ${input('previous_employer', 'Previous Employer', 'previous_employer')}
+                                        <div class="md:col-span-2">${input('previous_job_role', 'Previous Job Role', 'previous_job_role')}</div>
+                                    </div>
+
+                                    <div class="space-y-4">
+                                        <div class="flex flex-col">
+                                            <label class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Core Skills & Competencies</label>
+                                            ${isEdit 
+                                                ? `
+                                                <input type="text" id="edit_skills_input" onkeydown="handleSkillKeydown(event)" class="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-slate-800 text-sm outline-none focus:border-brand-primary focus:ring-1 focus:ring-brand-primary transition-all shadow-sm" placeholder="Type a skill and press Enter to add">
+                                                <div id="edit_skills_container" class="flex flex-wrap gap-2 mt-3 mb-1">
+                                                    ${state.editSkills.map((s, i) => `
+                                                        <span class="inline-flex items-center px-2.5 py-1 rounded-md text-xs font-bold bg-indigo-50 text-brand-primary border border-indigo-100">
+                                                            ${s} 
+                                                            <button type="button" onclick="removeSkill(${i})" class="ml-1.5 hover:text-indigo-800 text-sm leading-none focus:outline-none">&times;</button>
+                                                        </span>
+                                                    `).join('')}
+                                                </div>
+                                                ` 
+                                                : `
+                                                <div class="text-sm font-semibold text-slate-800 py-1 min-h-[32px] flex flex-wrap gap-2">
+                                                    ${(function(){
+                                                        try {
+                                                            let s = emp.skills;
+                                                            if(!s || s==='N/A' || s==='[]') return '<span class="text-slate-300 italic font-normal">Not provided</span>';
+                                                            let arr = (typeof s === 'string' && s.startsWith('[')) ? JSON.parse(s) : (typeof s === 'string' ? s.split(',') : s);
+                                                            return arr.map(skill => `<span class="px-2.5 py-1 bg-indigo-50 border border-indigo-100 text-brand-primary text-xs font-bold rounded-md">${skill.trim()}</span>`).join('');
+                                                        } catch(e) { return `<span class="px-2.5 py-1 bg-indigo-50 border border-indigo-100 text-brand-primary text-xs font-bold rounded-md">${emp.skills}</span>`; }
+                                                    })()}
+                                                </div>
+                                                `
+                                            }
+                                        </div>
+                                        ${input('resume', 'Resume / Portfolio Link', 'resume', 'url', '[https://drive.google.com/](https://drive.google.com/)...')}
+                                    </div>
+                                </div>
+
+                                <!-- Bank Details Card -->
+                                <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
+                                    <h3 class="text-sm font-black text-slate-800 uppercase tracking-wider mb-5 flex items-center"><i data-lucide="building" class="w-4 h-4 mr-2 text-brand-primary"></i> Banking & Payment</h3>
+                                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                        ${input('bank_name', 'Bank Name', 'bank_name')}
+                                        ${input('bank_account', 'Account Number', 'bank_account')}
+                                        ${input('ifsc_code', 'IFSC / Routing Code', 'ifsc_code')}
+                                        ${input('upi_id', 'UPI ID', 'upi_id', 'text', 'e.g. user@okhdfcbank')}
+                                    </div>
+                                </div>
+
+                                <!-- Compliance Documents -->
+                                <div class="bg-slate-800 rounded-2xl border border-slate-900 shadow-sm p-6 text-white">
+                                    <h3 class="text-sm font-black text-white uppercase tracking-wider mb-5 flex items-center"><i data-lucide="shield-check" class="w-4 h-4 mr-2 text-emerald-400"></i> Compliance Uploads</h3>
+                                    <p class="text-xs text-slate-400 mb-6">Click any box to securely upload or overwrite your official compliance documents. Max size 5MB.</p>
+                                    
+                                    <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
+                                        ${getUploadBoxHtml('Aadhar Front', 'adhar', 'front', emp.adhar_front)}
+                                        ${getUploadBoxHtml('Aadhar Back', 'adhar', 'back', emp.adhar_back)}
+                                        ${getUploadBoxHtml('PAN Front', 'pan', 'front', emp.pan_front)}
+                                        ${getUploadBoxHtml('PAN Back', 'pan', 'back', emp.pan_back)}
+                                        ${getUploadBoxHtml('Bank QR Code', 'qr', 'code', emp.qr_code)}
+                                    </div>
+                                </div>
+
+                            </div>
+                        </div>
+                    </form>
+                </div>
+            `;
+        }
+
+        function getUploadBoxHtml(label, type, subType, currentValue) {
+            const isUploaded = currentValue && currentValue !== 'N/A';
+            const inputId = `upload-${type}-${subType}`;
+            
+            return `
+                <div class="border border-dashed ${isUploaded ? 'border-emerald-500 bg-emerald-500/10' : 'border-slate-600 bg-slate-900/50 hover:border-brand-primary'} rounded-xl p-3 flex flex-col items-center justify-center text-center relative transition-colors group h-24">
+                    <input type="file" id="${inputId}" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10" accept="image/*" onchange="handleFileUpload(event, '${type}', '${subType}')">
+                    
+                    ${isUploaded ? `
+                        <i data-lucide="check-circle" class="w-5 h-5 text-emerald-400 mb-1.5"></i>
+                        <span class="text-[10px] font-bold text-slate-200 leading-tight">${label}</span>
+                        <span class="text-[9px] text-emerald-400 mt-1 uppercase tracking-wider font-bold">Uploaded</span>
+                    ` : `
+                        <i data-lucide="upload-cloud" class="w-5 h-5 text-slate-500 group-hover:text-brand-primary mb-1.5 transition-colors"></i>
+                        <span class="text-[10px] font-bold text-slate-300 leading-tight">${label}</span>
+                        <span class="text-[9px] text-slate-500 mt-1 uppercase tracking-wider">Required</span>
+                    `}
+                </div>
+            `;
+        }
+
+        // --- Action Handlers ---
+        async function handleTaskSubmit(event, type) {
+            event.preventDefault();
+            const btn = document.getElementById(`btn-submit-${type === 'developer' ? 'dev' : 'con'}`);
+            const originalText = btn.innerHTML;
+            btn.innerHTML = '<i data-lucide="loader-2" class="w-5 h-5 animate-spin text-white mx-auto"></i>';
+            btn.disabled = true;
+
+            try {
+                let payload = {
+                    employee_id: state.user.id,
+                    project_id: document.getElementById(`${type === 'developer' ? 'dev' : 'con'}-project`).value || null,
+                    hours_logged: parseFloat(document.getElementById(`${type === 'developer' ? 'dev' : 'con'}-hours`).value)
+                };
+
+                if (type === 'developer') {
+                    payload.tech_stack = state.devTechStack.length > 0 ? JSON.stringify(state.devTechStack) : 'N/A';
+                    payload.github_link = document.getElementById('dev-link').value || 'N/A';
+                    payload.task_performed = document.getElementById('dev-task').value;
+                    payload.tomorrow_plan = document.getElementById('dev-plan').value || 'N/A';
+                } else {
+                    payload.reels_count = parseInt(document.getElementById('con-reels').value) || 0;
+                    payload.long_video_count = parseInt(document.getElementById('con-videos').value) || 0;
+                    payload.poster_count = parseInt(document.getElementById('con-posters').value) || 0;
+                    payload.calls_made = parseInt(document.getElementById('con-calls').value) || 0;
+                    payload.platform = document.getElementById('con-platform').value || 'N/A';
+                    payload.task_performed = document.getElementById('con-task').value;
+                }
+
+                await apiFetch(`/tasks/${type}/create`, { method: 'POST', body: payload });
+                showToast("Timesheet submitted successfully!", "success");
+                if (type === 'developer') state.devTechStack = []; // Clear tech stack tags
+                await loadEmployeeWorkspaceData();
+                routeApp('dashboard');
+                
+            } catch (error) {
+                showToast("Submission failed: " + error.message, "error");
+                btn.innerHTML = originalText; btn.disabled = false;
+                lucide.createIcons();
+            }
+        }
+
+        async function handleFileUpload(event, type, subType) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            if (file.size > 5 * 1024 * 1024) {
+                showToast("File is too large. Maximum size is 5MB.", "error");
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append("file", file);
+
+            try {
+                showToast(`Uploading ${subType} image...`, "info");
+                await apiFetch(`/uploads/image/?image_type=${type}&sub_type=${subType}`, {
+                    method: 'POST', body: formData 
+                });
+
+                showToast("Upload successful!", "success");
+                await loadEmployeeWorkspaceData();
+                routeApp('profile');
+            } catch (error) {
+                showToast("Upload failed: " + error.message, "error");
+            }
+        }
+
+        function openChangePasswordModal() {
+            const html = `
+                <form onsubmit="handleChangePassword(event)" class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-semibold text-slate-700 mb-1">New Password *</label>
+                        <input type="password" id="cp_new" required minlength="8" class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm" placeholder="••••••••">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-semibold text-slate-700 mb-1">Confirm New Password *</label>
+                        <input type="password" id="cp_confirm" required minlength="8" class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm" placeholder="••••••••">
+                    </div>
+                    <div class="mt-6 flex justify-end gap-3 pt-4 border-t border-slate-100">
+                        <button type="button" onclick="closeModal()" class="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg font-medium transition-colors">Cancel</button>
+                        <button type="submit" id="btnChangePwd" class="px-5 py-2 bg-brand-primary text-white rounded-lg font-medium shadow-sm hover:bg-indigo-700 transition-all flex items-center gap-2">
+                            <i data-lucide="key" class="w-4 h-4"></i> Update Password
+                        </button>
+                    </div>
+                </form>
+            `;
+            openModal('Change Password', html);
+        }
+
+        async function handleChangePassword(e) {
+            e.preventDefault();
+            const pass = document.getElementById('cp_new').value;
+            const confirm = document.getElementById('cp_confirm').value;
+            if (pass !== confirm) {
+                showToast("Passwords do not match!", "error");
+                return;
+            }
+
+            const btn = document.getElementById('btnChangePwd');
+            const og = btn.innerHTML;
+            btn.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 mr-2 animate-spin"></i> Updating...'; 
+            btn.disabled = true;
+
+            try {
+                await apiFetch('/employees/update/' + state.user.id, {
+                    method: 'PUT',
+                    body: { password: pass }
+                });
+                showToast("Password updated successfully!", "success");
+                closeModal();
+            } catch (err) {
+                showToast("Failed to update password: " + err.message, "error");
+            } finally {
+                if(btn) { btn.innerHTML = og; btn.disabled = false; lucide.createIcons(); }
+            }
+        }
+
+        function handleSkillKeydown(event) {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                const val = event.target.value.trim();
+                if (val && !state.editSkills.includes(val)) {
+                    state.editSkills.push(val);
+                    renderSkillsTags();
+                    event.target.value = '';
+                }
+            }
+        }
+
+        function removeSkill(idx) {
+            state.editSkills.splice(idx, 1);
+            renderSkillsTags();
+        }
+
+        function renderSkillsTags() {
+            const container = document.getElementById('edit_skills_container');
+            if (container) {
+                container.innerHTML = state.editSkills.map((s, i) => `
+                    <span class="inline-flex items-center px-2.5 py-1 rounded-md text-xs font-bold bg-indigo-50 text-brand-primary border border-indigo-100">
+                        ${s} 
+                        <button type="button" onclick="removeSkill(${i})" class="ml-1.5 hover:text-indigo-800 text-sm leading-none focus:outline-none">&times;</button>
+                    </span>
+                `).join('');
+            }
+        }
+
+        function handleDevTechKeydown(event) {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                const val = event.target.value.trim();
+                if (val && !state.devTechStack.includes(val)) {
+                    state.devTechStack.push(val);
+                    renderDevTechTags();
+                    event.target.value = '';
+                }
+            }
+        }
+
+        function removeDevTech(idx) {
+            state.devTechStack.splice(idx, 1);
+            renderDevTechTags();
+        }
+
+        function renderDevTechTags() {
+            const container = document.getElementById('dev_tech_container');
+            if (container) {
+                container.innerHTML = state.devTechStack.map((t, i) => `
+                    <span class="inline-flex items-center px-2.5 py-1 rounded-md text-xs font-bold bg-indigo-50 text-brand-primary border border-indigo-100">
+                        ${t} 
+                        <button type="button" onclick="removeDevTech(${i})" class="ml-1.5 hover:text-indigo-800 text-sm leading-none focus:outline-none">&times;</button>
+                    </span>
+                `).join('');
+            }
+        }
+
+        function toggleEditProfile() {
+            state.isEditingProfile = !state.isEditingProfile;
+            if (state.isEditingProfile) {
+                const emp = state.employeeData || {};
+                let skillsList = [];
+                try {
+                    if (emp.skills && emp.skills !== 'N/A' && emp.skills !== '[]') {
+                        if (typeof emp.skills === 'string' && emp.skills.startsWith('[')) {
+                            skillsList = JSON.parse(emp.skills);
+                        } else if (typeof emp.skills === 'string') {
+                            skillsList = emp.skills.split(',').map(s => s.trim()).filter(Boolean);
+                        } else if (Array.isArray(emp.skills)) {
+                            skillsList = emp.skills;
+                        }
+                    }
+                } catch(e) {}
+                state.editSkills = skillsList;
+            }
+            renderEmployeeApp();
+        }
+
+        async function handleProfileSave(event) {
+            event.preventDefault();
+            const btn = document.getElementById('saveProfileBtn');
+            const ogText = btn.innerHTML;
+            btn.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin mr-2"></i> Saving...';
+            btn.disabled = true;
+
+            const fields = [
+                'full_name', 'fathers_name', 'date_of_birth', 'contact_number', 'alternate_contact', 'address',
+                'email', 'alternate_email', 'date_of_joining', 'highest_qualification', 'specialization',
+                'experience', 'previous_employer', 'previous_job_role', 'skills', 'emergency_contact',
+                'relationship_with_emergency_contact', 'bank_name', 'bank_account', 'ifsc_code', 'upi_id', 'resume'
+            ];
+
+            const payload = {};
+            fields.forEach(field => {
+                if (field === 'skills') {
+                    payload['skills'] = JSON.stringify(state.editSkills);
+                    return;
+                }
+                const el = document.getElementById(`edit_${field}`);
+                if (el) payload[field] = el.value || "N/A";
+            });
+            
+            // Gender is a select dropdown
+            const genderEl = document.getElementById('edit_gender');
+            if (genderEl) payload['gender'] = genderEl.value;
+
+            try {
+                await apiFetch(`/employees/update/${state.user.id}`, {
+                    method: 'PUT',
+                    body: payload
+                });
+                showToast("Profile updated successfully!", "success");
+                state.isEditingProfile = false;
+                await loadEmployeeWorkspaceData();
+                renderEmployeeApp();
+            } catch (error) {
+                showToast("Update failed: " + error.message, "error");
+                btn.innerHTML = ogText;
+                btn.disabled = false;
+                lucide.createIcons();
+            }
+        }
+
+        // --- Bootstrap Application ---
+        document.addEventListener('DOMContentLoaded', () => {
+            const token = sessionStorage.getItem(CONFIG.TOKEN_KEY);
+            
+            // Hard Auth Check
+            if (!token) {
+                window.location.href = CONFIG.LOGIN_URL;
+                return;
+            }
+
+            state.user = parseJwt(token);
+            
+            // Validate expiration and role isolation (Kick admins back to admin.html, kick expired to login.html)
+            if (!state.user || state.user.exp * 1000 < Date.now()) {
+                sessionStorage.removeItem(CONFIG.TOKEN_KEY);
+                window.location.href = CONFIG.LOGIN_URL;
+                return;
+            }
+
+            if (state.user.role.toLowerCase() === 'admin') {
+                window.location.href = 'admin.html';
+                return;
+            }
+
+            routeApp('dashboard');
+        });
+    </script>
+</body>
+</html>

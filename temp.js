@@ -1,0 +1,7207 @@
+
+      /**
+       * YANA OS - ADMIN PORTAL ENGINE (Phases 3 & 4)
+       */
+
+      // --- Configuration ---
+      const CONFIG = {
+        API_BASE_URL: "http://localhost:8000",
+        TOKEN_KEY: "yana_os_token",
+        LOGIN_URL: "login.html",
+      };
+
+      // --- State Management ---
+      const state = {
+        user: null,
+        // Read from sessionStorage or default to 'dashboard' / 'employees'
+        adminView: sessionStorage.getItem("lastAdminView") || "dashboard",
+        workforceTab: sessionStorage.getItem("lastWorkforceTab") || "employees",
+        allProjects: [],
+        projectFilter: "All",
+        projectSearchTerm: "",
+        allEmployees: [],
+        allManagers: [],
+        allAdmins: [],
+        allRoles: [],
+        allTasks: [],
+        allAttendance: [],
+        allLoginHistory: [],
+        allLeaveRequests: [],
+        allClients: [], // Formalized Client Registry
+        attendanceTab: "logs", // 'logs', 'login', 'leave'
+        adminDataLoaded: false,
+        dashboardData: null,
+        appShellRendered: false, // NEW: Tracks if layout is already drawn
+
+        // Phase 5: Project Command Center State
+        activeProject: null,
+        activeProjectTab: "overview",
+        projectAssignments: [], // Fetched dynamically
+        projectTimeline: [], // Fetched dynamically
+        projectSRS: [], // Fetched dynamically
+
+        // Client & Employee Command Center States
+        activeClient: null,
+        activeClientTab: "overview",
+        activeEmployee: null,
+        activeEmployeeTab: "overview",
+        activeEmployeeAnalytics: null,
+        activeEmployeeProjects: null,
+
+        // Dashboard Local State
+        isDailyReportVisible: false,
+        dailyReportDataCache: null,
+        isDashboardLoading: false,
+        isEditingEmployee: false,
+      };
+
+      // --- Chart Instances ---
+      const chartInstances = {};
+
+      // --- Utilities ---
+      function showToast(message, type = "info") {
+        const container = document.getElementById("toast-container");
+        const toast = document.createElement("div");
+        let iconSvg = "";
+        let bgColor = "";
+
+        if (type === "error") {
+          bgColor = "bg-brand-alert";
+          iconSvg = `<i data-lucide="alert-circle" class="w-5 h-5 text-white"></i>`;
+        } else if (type === "success") {
+          bgColor = "bg-brand-accent";
+          iconSvg = `<i data-lucide="check-circle-2" class="w-5 h-5 text-white"></i>`;
+        } else {
+          bgColor = "bg-slate-800";
+          iconSvg = `<i data-lucide="info" class="w-5 h-5 text-white"></i>`;
+        }
+
+        toast.className = `toast-enter flex items-center p-4 rounded-lg shadow-lg text-white pointer-events-auto ${bgColor}`;
+        toast.innerHTML = `<div class="mr-3">${iconSvg}</div><div class="font-medium text-sm flex-1">${message}</div><button onclick="this.parentElement.remove()" class="ml-4 opacity-80 hover:opacity-100"><i data-lucide="x" class="w-4 h-4"></i></button>`;
+        container.appendChild(toast);
+        lucide.createIcons();
+        setTimeout(() => {
+          toast.classList.remove("toast-enter");
+          toast.classList.add("toast-exit");
+          setTimeout(() => toast.remove(), 400);
+        }, 4000);
+      }
+
+      function parseJwt(token) {
+        try {
+          const base64Url = token.split(".")[1];
+          const base64 = base64Url.replace(/-/g, "+").replace(/_/g, "/");
+          const jsonPayload = decodeURIComponent(
+            atob(base64)
+              .split("")
+              .map((c) => "%" + ("00" + c.charCodeAt(0).toString(16)).slice(-2))
+              .join(""),
+          );
+          return JSON.parse(jsonPayload);
+        } catch (e) {
+          return null;
+        }
+      }
+
+      function formatCurrency(amount) {
+        return new Intl.NumberFormat("en-IN", {
+          style: "currency",
+          currency: "INR",
+        }).format(amount || 0);
+      }
+
+      function formatNumber(num) {
+        if (num >= 1000000) return (num / 1000000).toFixed(1) + "M";
+        if (num >= 1000) return (num / 1000).toFixed(1) + "K";
+        return num.toString();
+      }
+
+      function round(value, decimals = 0) {
+        const multiplier = Math.pow(10, decimals);
+        return Math.round(value * multiplier) / multiplier;
+      }
+
+      // --- Global Modal Engine ---
+      function openModal(title, contentHtml) {
+        const modal = document.getElementById("global-modal");
+        const content = document.getElementById("modal-content");
+
+        content.innerHTML = `
+                <div class="flex items-center justify-between p-6 border-b border-slate-100 bg-slate-50">
+                    <h3 class="text-xl font-bold text-slate-800">${title}</h3>
+                    <button onclick="closeModal()" class="text-slate-400 hover:text-slate-600 transition-colors">
+                        <i data-lucide="x" class="w-6 h-6"></i>
+                    </button>
+                </div>
+                <div class="p-6 max-h-[80vh] overflow-y-auto">
+                    ${contentHtml}
+                </div>
+            `;
+
+        modal.classList.remove("hidden");
+        modal.classList.add("flex");
+        lucide.createIcons();
+        setTimeout(() => {
+          modal.classList.remove("opacity-0");
+          content.classList.remove("scale-95");
+        }, 10);
+      }
+
+      function closeModal() {
+        const modal = document.getElementById("global-modal");
+        const content = document.getElementById("modal-content");
+
+        modal.classList.add("opacity-0");
+        content.classList.add("scale-95");
+        setTimeout(() => {
+          modal.classList.add("hidden");
+          modal.classList.remove("flex");
+          content.innerHTML = "";
+        }, 300);
+      }
+
+      function customConfirm(
+        title,
+        message,
+        confirmText = "Confirm",
+        cancelText = "Cancel",
+        isDanger = false,
+      ) {
+        return new Promise((resolve) => {
+          const btnClass = isDanger
+            ? "bg-rose-500 hover:bg-rose-600 text-white shadow-rose-500/20"
+            : "bg-brand-primary hover:bg-indigo-600 text-white shadow-indigo-500/20";
+          const iconStr = isDanger
+            ? '<i data-lucide="alert-triangle" class="w-6 h-6 text-rose-500"></i>'
+            : '<i data-lucide="help-circle" class="w-6 h-6 text-brand-primary"></i>';
+
+          const html = `
+                    <div class="flex items-start gap-4">
+                        <div class="w-12 h-12 rounded-full ${isDanger ? "bg-rose-100" : "bg-indigo-50"} flex items-center justify-center shrink-0">
+                            ${iconStr}
+                        </div>
+                        <div class="flex-1">
+                            <p class="text-slate-600 mb-6 text-sm">${message}</p>
+                            <div class="flex justify-end gap-3 pt-4 border-t border-slate-100">
+                                <button type="button" id="confirm-cancel-btn" class="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg font-medium transition-colors">${cancelText}</button>
+                                <button type="button" id="confirm-ok-btn" class="px-5 py-2 ${btnClass} rounded-lg font-medium shadow-sm transition-all flex items-center gap-2">
+                                    ${confirmText}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+          openModal(title, html);
+
+          document
+            .getElementById("confirm-cancel-btn")
+            .addEventListener("click", () => {
+              closeModal();
+              resolve(false);
+            });
+          document
+            .getElementById("confirm-ok-btn")
+            .addEventListener("click", () => {
+              closeModal();
+              resolve(true);
+            });
+        });
+      }
+
+      function customAlert(title, message) {
+        return new Promise((resolve) => {
+          const html = `
+                    <div class="flex items-start gap-4">
+                        <div class="w-12 h-12 rounded-full bg-indigo-50 flex items-center justify-center shrink-0">
+                            <i data-lucide="info" class="w-6 h-6 text-brand-primary"></i>
+                        </div>
+                        <div class="flex-1">
+                            <p class="text-slate-600 mb-6 text-sm">${message}</p>
+                            <div class="flex justify-end gap-3 pt-4 border-t border-slate-100">
+                                <button type="button" id="alert-ok-btn" class="px-5 py-2 bg-brand-primary hover:bg-indigo-600 text-white shadow-indigo-500/20 rounded-lg font-medium shadow-sm transition-all">
+                                    OK
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+          openModal(title, html);
+
+          document
+            .getElementById("alert-ok-btn")
+            .addEventListener("click", () => {
+              closeModal();
+              resolve(true);
+            });
+        });
+      }
+
+      // --- API Wrapper ---
+      async function apiFetch(endpoint, options = {}) {
+        const token = sessionStorage.getItem(CONFIG.TOKEN_KEY);
+        const headers = { ...options.headers };
+        if (token) headers["Authorization"] = `Bearer ${token}`;
+        if (
+          !headers["Content-Type"] &&
+          !(options.body instanceof FormData) &&
+          typeof options.body !== "string"
+        ) {
+          headers["Content-Type"] = "application/json";
+          if (options.body) options.body = JSON.stringify(options.body);
+        }
+
+        try {
+          const response = await fetch(`${CONFIG.API_BASE_URL}${endpoint}`, {
+            ...options,
+            headers,
+          });
+          if (response.status === 401) {
+            logout(false);
+            throw new Error("Session expired.");
+          }
+          const data = await response.json().catch(() => ({}));
+          if (!response.ok)
+            throw new Error(
+              data.detail ||
+                data.error ||
+                data.critical_error ||
+                "An unexpected error occurred.",
+            );
+          return data;
+        } catch (error) {
+          if (error.message === "Failed to fetch")
+            showToast("Unable to connect to the server.", "error");
+          throw error;
+        }
+      }
+
+      // --- Auth Actions ---
+      async function logout(showNotification = true) {
+        sessionStorage.removeItem(CONFIG.TOKEN_KEY);
+        if (showNotification)
+          await customAlert("Logged Out", "Logged out successfully");
+        window.location.href = CONFIG.LOGIN_URL;
+      }
+
+      // --- Admin Data Loaders ---
+      async function loadAdminWorkspaceData() {
+        try {
+          const [
+            projects,
+            tasks,
+            employees,
+            admins,
+            roles,
+            managers,
+            clients,
+            attendance,
+            loginHistory,
+            leaveRequests,
+          ] = await Promise.all([
+            apiFetch("/projects/all").catch(() => []),
+            apiFetch("/tasks/all").catch(() => []),
+            apiFetch("/employees/all").catch(() => []),
+            apiFetch("/admins/all").catch(() => []),
+            apiFetch("/departments-roles/all").catch(() => []),
+            apiFetch("/projects/managers/all").catch(() => []),
+            apiFetch("/clients/all").catch(() => []),
+            apiFetch("/attendance/all").catch(() => []),
+            apiFetch("/attendance/login-history").catch(() => []),
+            apiFetch("/attendance/leave-requests").catch(() => []),
+          ]);
+          state.allProjects = Array.isArray(projects) ? projects : [];
+          state.allTasks = Array.isArray(tasks) ? tasks : [];
+          state.allEmployees = Array.isArray(employees) ? employees : [];
+          state.allAdmins = Array.isArray(admins) ? admins : [];
+          state.allRoles = Array.isArray(roles) ? roles : [];
+          state.allManagers = Array.isArray(managers) ? managers : [];
+          state.allClients = Array.isArray(clients) ? clients : [];
+          state.allAttendance = Array.isArray(attendance) ? attendance : [];
+          state.allLoginHistory = Array.isArray(loginHistory)
+            ? loginHistory
+            : [];
+          state.allLeaveRequests = Array.isArray(leaveRequests)
+            ? leaveRequests
+            : [];
+          state.adminDataLoaded = true;
+        } catch (error) {
+          showToast("Failed to load admin framework data.", "error");
+        }
+      }
+
+      let isDashboardLoading = false;
+      async function loadDashboardData() {
+        if (isDashboardLoading) return;
+        isDashboardLoading = true;
+        try {
+          const [summary, feed] =
+            await Promise.all([
+              apiFetch("/dashboard/v2/summary").catch(() => null),
+              apiFetch("/dashboard/live-feed").catch(() => null),
+            ]);
+
+          state.dashboardData = {
+            summary: summary || null,
+            feed: feed || { live_stream: [], system_alerts: [] },
+          };
+        } catch (error) {
+          showToast("Failed to load dashboard analytics.", "error");
+        } finally {
+          isDashboardLoading = false;
+        }
+      }
+
+      // --- Routing Engine ---
+      async function routeApp(view = null, tab = null) {
+        if (view) {
+          state.adminView = view;
+          sessionStorage.setItem("lastAdminView", view); // Save View
+
+          // ARCHITECTURE FIX: Clear activeProject if we navigate away from projects
+          if (view !== "projects") state.activeProject = null;
+          if (view !== "clients") state.activeClient = null;
+          if (view !== "workforce") state.activeEmployee = null;
+
+          // Close mobile sidebar on navigation
+          const sidebar = document.getElementById("main-sidebar");
+          if (
+            sidebar &&
+            !sidebar.classList.contains("-translate-x-full") &&
+            window.innerWidth < 768
+          ) {
+            toggleMobileSidebar();
+          }
+        }
+        if (tab) {
+          state.workforceTab = tab;
+          sessionStorage.setItem("lastWorkforceTab", tab); // Save Tab
+          state.activeEmployee = null; // Clear active employee when switching workforce tabs
+        }
+        const appDiv = document.getElementById("app");
+        const renderLoader = (msg) => {
+          appDiv.innerHTML = `<div class="h-full w-full flex items-center justify-center bg-slate-50"><div class="flex flex-col items-center"><i data-lucide="loader-2" class="w-10 h-10 animate-spin text-brand-primary mb-4"></i><p class="text-slate-500 font-medium">${msg}</p></div></div>`;
+          lucide.createIcons();
+        };
+
+        if (!state.adminDataLoaded) {
+          renderLoader("Initializing Executive Control Center...");
+          await loadAdminWorkspaceData();
+        }
+
+        // Phase 4: Non-Blocking Dashboard Hydration
+        if (state.adminView === "dashboard" && !state.dashboardData) {
+          // Trigger fetch in background so we don't block initial shell render
+          loadDashboardData().then(() => {
+            if (state.adminView === "dashboard") renderAdminApp();
+          });
+        }
+
+        renderAdminApp();
+      }
+
+      // --- Search Handlers ---
+      window.handleAdminEmpSearchDOM = function (val) {
+        state.empSearchTerm = val;
+        renderAdminApp();
+      };
+
+      window.handleAdminRoleSearchDOM = function (val) {
+        const st = val.toLowerCase();
+        document.querySelectorAll(".role-row-item").forEach((row) => {
+          const text = row.innerText.toLowerCase();
+          row.style.display = text.includes(st) ? "" : "none";
+        });
+      };
+
+      // ==========================================
+      //         PHASE 3 & 4: ADMIN UI ENGINE
+      // ==========================================
+
+      function renderAdminApp() {
+        const appDiv = document.getElementById("app");
+        let contentHtml = "";
+
+        // Get the HTML for the currently selected view
+        if (state.adminView === "dashboard")
+          contentHtml = getAdminDashboardTemplate();
+        else if (state.adminView === "projects")
+          contentHtml = getAdminProjectsTemplate();
+        else if (state.adminView === "clients")
+          contentHtml = getAdminClientsTemplate();
+        else if (state.adminView === "workforce")
+          contentHtml = getAdminWorkforceTemplate();
+        else if (state.adminView === "attendance")
+          contentHtml = getAdminAttendanceTemplate();
+        else if (state.adminView === "timesheets")
+          contentHtml = getAdminTimesheetsTemplate();
+
+        // ARCHITECTURE FIX: If the App Shell isn't drawn yet, draw everything.
+        if (!state.appShellRendered) {
+          const sidebarClass =
+            localStorage.getItem("yanaSidebarCollapsed") === "true"
+              ? "sidebar-collapsed"
+              : "";
+          appDiv.innerHTML = `
+                    <div class="flex h-full w-full bg-slate-50 overflow-hidden relative">
+                        <!-- Mobile Sidebar Overlay -->
+                        <div id="mobile-sidebar-overlay" class="fixed inset-0 bg-slate-900/50 z-40 hidden md:hidden opacity-0 transition-opacity duration-300" onclick="toggleMobileSidebar()"></div>
+
+                        <!-- Admin Sidebar -->
+                        <aside id="main-sidebar" class="w-64 bg-slate-900 text-slate-300 flex flex-col shrink-0 transition-transform duration-300 z-50 fixed md:relative h-full -translate-x-full md:translate-x-0 border-r border-slate-800 ${sidebarClass}">
+                            <div class="h-16 flex items-center px-6 bg-slate-950 border-b border-slate-800 shrink-0">
+                                <div class="w-8 h-8 bg-brand-accent rounded-md flex items-center justify-center mr-3 shadow-lg">
+                                    <i data-lucide="shield" class="text-white w-5 h-5"></i>
+                                </div>
+                                <span class="font-bold text-white text-lg tracking-tight">Yana <span class="text-brand-accent font-normal">Admin</span></span>
+                            </div>
+                            <nav class="flex-1 px-4 py-6 space-y-2 overflow-y-auto" id="sidebar-nav">
+                                <button onclick="routeApp('dashboard')" data-view="dashboard" class="nav-btn w-full flex items-center px-4 py-3 rounded-xl transition-all">
+                                    <i data-lucide="pie-chart" class="w-5 h-5 mr-3"></i> <span class="font-medium">Dashboard</span>
+                                </button>
+                                <button onclick="routeApp('projects')" data-view="projects" class="nav-btn w-full flex items-center px-4 py-3 rounded-xl transition-all">
+                                    <i data-lucide="folder-kanban" class="w-5 h-5 mr-3"></i> <span class="font-medium">Project Control</span>
+                                </button>
+                                <button onclick="routeApp('clients')" data-view="clients" class="nav-btn w-full flex items-center px-4 py-3 rounded-xl transition-all">
+                                    <i data-lucide="briefcase" class="w-5 h-5 mr-3"></i> <span class="font-medium">Clients</span>
+                                </button>
+                                <button onclick="routeApp('workforce')" data-view="workforce" class="nav-btn w-full flex items-center px-4 py-3 rounded-xl transition-all">
+                                    <i data-lucide="users" class="w-5 h-5 mr-3"></i> <span class="font-medium">Workforce</span>
+                                </button>
+                                <button onclick="routeApp('attendance')" data-view="attendance" class="nav-btn w-full flex items-center px-4 py-3 rounded-xl transition-all">
+                                    <i data-lucide="calendar-clock" class="w-5 h-5 mr-3"></i> <span class="font-medium">Attendance</span>
+                                </button>
+                                <button onclick="routeApp('timesheets')" data-view="timesheets" class="nav-btn w-full flex items-center px-4 py-3 rounded-xl transition-all">
+                                    <i data-lucide="book-open" class="w-5 h-5 mr-3"></i> <span class="font-medium">Financial Ledger</span>
+                                </button>
+                            </nav>
+                            <div class="p-4 border-t border-slate-800">
+                                <button onclick="logout()" class="w-full flex items-center px-4 py-3 rounded-xl hover:bg-brand-alert hover:text-white transition-all group">
+                                    <i data-lucide="log-out" class="w-5 h-5 mr-3 group-hover:text-white text-slate-400 transition-colors"></i> <span class="font-medium">Logout</span>
+                                </button>
+                            </div>
+                        </aside>
+
+                        <!-- Main Content -->
+                        <div class="flex-1 flex flex-col overflow-hidden relative">
+                            <header class="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-6 md:px-8 shrink-0 z-10 shadow-sm">
+                                <div class="flex items-center gap-3">
+                                    <button onclick="toggleMobileSidebar()" class="text-slate-500 hover:text-brand-primary transition-colors focus:outline-none">
+                                        <i data-lucide="menu" class="w-6 h-6"></i>
+                                    </button>
+                                    <h2 id="header-title" class="text-xl font-bold text-slate-800 tracking-tight capitalize">
+                                        ${state.adminView === "dashboard" ? "Executive Dashboard" : state.adminView.replace("-", " ")}
+                                    </h2>
+                                </div>
+                                <div class="flex items-center gap-4">
+                                    <div class="text-right hidden sm:block">
+                                        <p class="text-sm font-bold text-slate-800">${state.user.sub}</p>
+                                        <p class="text-xs text-brand-primary font-medium uppercase tracking-wider">${state.user?.access_level === "SystemAdmin" ? "System Administrator" : state.user?.access_level === "ManagerAdmin" ? "Manager Admin" : "HR Admin"}</p>
+                                    </div>
+                                    <div class="w-10 h-10 rounded-full bg-slate-900 text-white flex items-center justify-center shadow-md">
+                                        <i data-lucide="shield-check" class="w-5 h-5"></i>
+                                    </div>
+                                </div>
+                            </header>
+
+                            <main class="flex-1 overflow-y-auto p-4 md:p-8" id="main-scroll-area">
+                                <div class="max-w-7xl mx-auto" id="dynamic-content-area">
+                                    ${contentHtml}
+                                </div>
+                            </main>
+                        </div>
+                    </div>
+                `;
+          state.appShellRendered = true;
+        } else {
+          // ARCHITECTURE FIX: Shell exists. Just swap the inner content.
+          const dynamicArea = document.getElementById("dynamic-content-area");
+          if (dynamicArea) {
+            dynamicArea.innerHTML = contentHtml;
+
+            document.getElementById("header-title").innerText =
+              state.adminView === "dashboard"
+                ? "Executive Dashboard"
+                : state.adminView.replace("-", " ");
+
+            document.querySelectorAll(".nav-btn").forEach((btn) => {
+              if (btn.getAttribute("data-view") === state.adminView) {
+                btn.className =
+                  "nav-btn w-full flex items-center px-4 py-3 rounded-xl transition-all bg-brand-primary text-white shadow-md";
+              } else {
+                btn.className =
+                  "nav-btn w-full flex items-center px-4 py-3 rounded-xl transition-all hover:bg-slate-800 hover:text-white text-slate-300";
+              }
+            });
+
+            if (window.lucide) lucide.createIcons();
+            initChartsIfApplicable();
+            return; // EXIT EARLY so we don't double-trigger below
+          }
+        }
+
+        // This block ONLY runs on the true first render
+        document.querySelectorAll(".nav-btn").forEach((btn) => {
+          if (btn.getAttribute("data-view") === state.adminView) {
+            btn.className =
+              "nav-btn w-full flex items-center px-4 py-3 rounded-xl transition-all bg-brand-primary text-white shadow-md";
+          } else {
+            btn.className =
+              "nav-btn w-full flex items-center px-4 py-3 rounded-xl transition-all hover:bg-slate-800 hover:text-white text-slate-300";
+          }
+        });
+
+        if (window.lucide) lucide.createIcons();
+        initChartsIfApplicable();
+      }
+
+      // Helper to delay chart/table rendering until DOM is painted
+      function initChartsIfApplicable() {
+        if (state.adminView === "dashboard") {
+          setTimeout(initDashboardCharts, 50);
+        } else if (state.adminView === "projects") {
+          // If you implemented the phase 5 active project view, handle it here. Otherwise:
+          if (
+            typeof renderAdminProjectsTable === "function" &&
+            !state.activeProject
+          ) {
+            setTimeout(renderAdminProjectsTable, 50);
+          }
+        }
+      }
+      // ==========================================
+      //         PHASE 4: DASHBOARD VIEWS
+      // ==========================================
+
+            function getAdminDashboardTemplate() {
+        if (!state.dashboardData || !state.dashboardData.summary) {
+          return `
+                    <div class="h-full flex flex-col items-center justify-center space-y-4 animate-pulse">
+                        <div class="w-12 h-12 border-4 border-brand-primary border-t-transparent rounded-full animate-spin"></div>
+                        <p class="text-slate-500 font-bold tracking-widest uppercase text-xs">Loading Dashboard Metrics...</p>
+                    </div>
+                `;
+        }
+
+        const summary = state.dashboardData.summary;
+        const ov = summary.overview || {};
+        
+        const formatNumber = (num) => new Intl.NumberFormat('en-IN').format(num);
+
+        // Helper to generate trend arrow
+        const getTrend = (val, positiveIsGood = true) => {
+            const isPositive = val >= 0;
+            const color = (isPositive && positiveIsGood) || (!isPositive && !positiveIsGood) ? 'text-emerald-500' : 'text-rose-500';
+            const icon = isPositive ? 'trending-up' : 'trending-down';
+            return `<div class="mt-4 flex items-center gap-1.5 text-xs font-bold ${color} relative z-10"><i data-lucide="${icon}" class="w-3 h-3"></i> ${Math.abs(val)}% vs Last Month</div>`;
+        };
+
+        // KPI Cards HTML with Premium Aesthetics
+        const kpiHtml = `
+            <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6 mb-8">
+                <!-- KPI 1: Total Revenue -->
+                <div class="relative overflow-hidden bg-gradient-to-br from-indigo-600 to-indigo-800 rounded-3xl p-6 shadow-xl shadow-indigo-200/50 group transition-all hover:-translate-y-1">
+                    <div class="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
+                        <i data-lucide="indian-rupee" class="w-16 h-16 text-white"></i>
+                    </div>
+                    <p class="text-[10px] font-black text-indigo-100 uppercase tracking-widest mb-1 opacity-80">Realized Revenue</p>
+                    <h3 class="text-2xl font-black text-white mb-2">₹${formatNumber(ov.total_revenue || 0)}</h3>
+                    <div class="flex items-center gap-1.5 px-2 py-1 bg-white/10 w-fit rounded-full backdrop-blur-md">
+                        <i data-lucide="trending-up" class="w-3 h-3 text-emerald-300"></i>
+                        <span class="text-[10px] font-bold text-white">12.5% vs Prev Month</span>
+                    </div>
+                </div>
+
+                <!-- KPI 2: Total Projects -->
+                <div class="relative overflow-hidden bg-white rounded-3xl p-6 shadow-lg border border-slate-100 group transition-all hover:-translate-y-1">
+                    <div class="absolute top-0 right-0 p-4 opacity-5 group-hover:opacity-10 transition-opacity">
+                        <i data-lucide="layers" class="w-16 h-16 text-slate-800"></i>
+                    </div>
+                    <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Active Portfolio</p>
+                    <h3 class="text-2xl font-black text-slate-800 mb-2">${ov.total_projects || 0} Projects</h3>
+                    <div class="flex items-center gap-1.5 px-2 py-1 bg-slate-50 w-fit rounded-full border border-slate-100">
+                        <i data-lucide="check-circle" class="w-3 h-3 text-indigo-500"></i>
+                        <span class="text-[10px] font-bold text-slate-600">Global Execution</span>
+                    </div>
+                </div>
+
+                <!-- KPI 3: Total Employees -->
+                <div class="relative overflow-hidden bg-white rounded-3xl p-6 shadow-lg border border-slate-100 group transition-all hover:-translate-y-1">
+                    <div class="absolute top-0 right-0 p-4 opacity-5 group-hover:opacity-10 transition-opacity">
+                        <i data-lucide="users" class="w-16 h-16 text-slate-800"></i>
+                    </div>
+                    <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Total Workforce</p>
+                    <h3 class="text-2xl font-black text-slate-800 mb-2">${ov.total_employees || 0} Members</h3>
+                    <div class="flex items-center gap-1.5 px-2 py-1 bg-slate-50 w-fit rounded-full border border-slate-100">
+                        <i data-lucide="activity" class="w-3 h-3 text-emerald-500"></i>
+                        <span class="text-[10px] font-bold text-slate-600">Active Talent Pool</span>
+                    </div>
+                </div>
+
+                <!-- KPI 4: Total Clients -->
+                <div class="relative overflow-hidden bg-white rounded-3xl p-6 shadow-lg border border-slate-100 group transition-all hover:-translate-y-1">
+                    <div class="absolute top-0 right-0 p-4 opacity-5 group-hover:opacity-10 transition-opacity">
+                        <i data-lucide="briefcase" class="w-16 h-16 text-slate-800"></i>
+                    </div>
+                    <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Client Base</p>
+                    <h3 class="text-2xl font-black text-slate-800 mb-2">${ov.total_clients || 0} Entities</h3>
+                    <div class="flex items-center gap-1.5 px-2 py-1 bg-slate-50 w-fit rounded-full border border-slate-100">
+                        <i data-lucide="globe" class="w-3 h-3 text-brand-primary"></i>
+                        <span class="text-[10px] font-bold text-slate-600">Trusted Partners</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                <!-- KPI 9: Total Expenditure -->
+                <div class="bg-white rounded-2xl p-5 shadow-lg border border-slate-100 relative overflow-hidden group">
+                    <p class="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1">Global Burn Rate</p>
+                    <h3 class="text-xl font-black text-slate-800 mb-1.5">₹${formatNumber(ov.total_expenditure || 0)}</h3>
+                    <div class="flex items-center gap-1.5 px-2 py-0.5 bg-rose-50 text-rose-600 w-fit rounded-full border border-rose-100">
+                        <i data-lucide="trending-down" class="w-3 h-3"></i>
+                        <span class="text-[9px] font-bold">8.4% Efficiency Gain</span>
+                    </div>
+                </div>
+                <!-- KPI 10: Avg Efficiency -->
+                <div class="bg-white rounded-2xl p-5 shadow-lg border border-slate-100 relative overflow-hidden group">
+                    <p class="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1">Resource Efficiency</p>
+                    <h3 class="text-xl font-black text-emerald-600 mb-1.5">${ov.avg_efficiency || 0}%</h3>
+                    <div class="w-full bg-slate-100 h-1 rounded-full overflow-hidden">
+                        <div class="bg-emerald-500 h-full transition-all duration-1000" style="width: ${ov.avg_efficiency || 0}%"></div>
+                    </div>
+                </div>
+                <!-- KPI 11: Total Departments & Roles -->
+                <div class="bg-indigo-900 rounded-2xl p-5 shadow-xl relative overflow-hidden group">
+                    <div class="absolute -right-4 -bottom-4 w-20 h-20 bg-white/10 rounded-full blur-2xl"></div>
+                    <p class="text-[9px] font-black text-indigo-300 uppercase tracking-widest mb-1">Org Structure</p>
+                    <h3 class="text-xl font-black text-white mb-1">${Object.keys(summary.charts.department_counts || {}).length} Departments</h3>
+                    <p class="text-[9px] font-bold text-indigo-400">Scaling across organization</p>
+                </div>
+            </div>
+        `;
+
+        // Charts Grid - Cleaned and Professionally Styled
+        const chartsHtml = `
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
+                <!-- Revenue Chart -->
+                <div class="bg-white p-5 rounded-2xl border border-slate-100 shadow-xl shadow-slate-200/40">
+                    <div class="flex justify-between items-center mb-5">
+                        <div>
+                            <h4 class="text-sm font-black text-slate-800">Financial Growth</h4>
+                            <p class="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Revenue Trajectory</p>
+                        </div>
+                        <select id="revChartFilter" onchange="initDashboardCharts()" class="text-[10px] font-bold border-slate-200 rounded-full bg-slate-50 text-slate-600 px-2.5 py-1 ring-0 focus:ring-0">
+                            <option value="12">12 Months</option>
+                            <option value="6">6 Months</option>
+                        </select>
+                    </div>
+                    <div class="h-64"><canvas id="chartRevenue"></canvas></div>
+                </div>
+
+                <!-- Income vs Pending Chart -->
+                <div class="bg-white p-5 rounded-2xl border border-slate-100 shadow-xl shadow-slate-200/40">
+                    <div class="flex justify-between items-center mb-5">
+                        <div>
+                            <h4 class="text-sm font-black text-slate-800">Capital Ledger</h4>
+                            <p class="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Invoiced vs Outstanding</p>
+                        </div>
+                        <select id="incChartFilter" onchange="initDashboardCharts()" class="text-[10px] font-bold border-slate-200 rounded-full bg-slate-50 text-slate-600 px-2.5 py-1 ring-0 focus:ring-0">
+                            <option value="12">12 Months</option>
+                            <option value="6">6 Months</option>
+                        </select>
+                    </div>
+                    <div class="h-64"><canvas id="chartIncomePending"></canvas></div>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+                <!-- Dept P&L Chart -->
+                <div class="bg-white p-5 rounded-2xl border border-slate-100 shadow-xl shadow-slate-200/40">
+                    <h4 class="text-sm font-black text-slate-800 mb-0.5">Unit Performance</h4>
+                    <p class="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-5">Department P&L</p>
+                    <div class="h-64"><canvas id="chartDeptPL"></canvas></div>
+                </div>
+
+                <!-- Yearly Profit Comparison Chart -->
+                <div class="bg-white p-5 rounded-2xl border border-slate-100 shadow-xl shadow-slate-200/40">
+                    <div class="flex justify-between items-center mb-5">
+                        <div>
+                            <h4 class="text-sm font-black text-slate-800">Profitability Comparison</h4>
+                            <p class="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Multi-Year Analysis</p>
+                        </div>
+                        <select id="profitChartYear" onchange="initDashboardCharts()" class="text-[10px] font-bold border-slate-200 rounded-full bg-slate-50 text-slate-600 px-2.5 py-1 ring-0 focus:ring-0">
+                            <option value="all">Compare All Years</option>
+                            <option value="2026">2026</option>
+                            <option value="2025">2025</option>
+                        </select>
+                    </div>
+                    <div class="h-64"><canvas id="chartYearlyProfit"></canvas></div>
+                </div>
+            </div>
+        `;
+
+
+        const phase4Html = `
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-8 mb-8">
+                <!-- Project Track Section (Sharper Table-like card view) -->
+                <div class="bg-white rounded-2xl p-6 shadow-xl shadow-slate-200/60 border border-slate-50 lg:col-span-2">
+                    <div class="flex justify-between items-center mb-6">
+                        <div>
+                            <h4 class="text-lg font-black text-slate-800">Project Track</h4>
+                            <p class="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Real-time Execution Pipeline</p>
+                        </div>
+                        <button class="p-1.5 bg-slate-50 rounded-lg hover:bg-slate-100 transition-colors"><i data-lucide="more-horizontal" class="w-4 h-4 text-slate-400"></i></button>
+                    </div>
+                    
+                    <div class="space-y-4 max-h-[500px] overflow-y-auto pr-4 custom-scrollbar">
+                        ${summary.project_track.map(p => {
+                            const progressVal = parseInt(p.progress) || 0;
+                            const marginColor = p.profit_margin >= 20 ? 'text-emerald-500 bg-emerald-50' : p.profit_margin >= 0 ? 'text-indigo-500 bg-indigo-50' : 'text-rose-500 bg-rose-50';
+                            
+                            return `
+                                <div class="group bg-white p-4 rounded-2xl border border-slate-100 hover:border-indigo-100 hover:shadow-xl hover:shadow-indigo-500/5 transition-all duration-300">
+                                    <div class="flex flex-col md:flex-row justify-between gap-3 mb-3">
+                                        <div class="flex-1">
+                                            <div class="flex items-center gap-2 mb-0.5">
+                                                <h5 class="font-black text-slate-800 text-xs group-hover:text-indigo-600 transition-colors">${p.name}</h5>
+                                                <span class="px-1.5 py-0.5 text-[8px] font-black uppercase rounded bg-slate-100 text-slate-500">${p.status}</span>
+                                            </div>
+                                            <p class="text-[9px] font-bold text-slate-400 uppercase">Phase Execution: ${p.milestones} Milestones</p>
+                                        </div>
+                                        <div class="flex gap-3 text-right">
+                                            <div>
+                                                <p class="text-[8px] font-black text-slate-400 uppercase mb-0.5">Client Cost</p>
+                                                <span class="text-[9px] font-black text-slate-800">${formatCurrency(p.client_cost || 0)}</span>
+                                            </div>
+                                            <div>
+                                                <p class="text-[8px] font-black text-slate-400 uppercase mb-0.5">Profit Margin</p>
+                                                <span class="px-2 py-0.5 rounded-full text-[9px] font-black ${marginColor}">${p.profit_margin}%</span>
+                                            </div>
+                                            <div>
+                                                <p class="text-[8px] font-black text-slate-400 uppercase mb-0.5">Budget Burn</p>
+                                                <span class="px-2 py-0.5 rounded-full text-[9px] font-black ${p.percent_spent > 90 ? 'bg-rose-50 text-rose-600' : 'bg-slate-50 text-slate-600'}">${p.percent_spent}%</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="flex items-center gap-3">
+                                        <div class="flex-1 h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                                            <div class="bg-indigo-600 h-full transition-all duration-1000" style="width: ${progressVal}%"></div>
+                                        </div>
+                                        <span class="text-[10px] font-black text-slate-700 w-8 text-right">${p.progress}</span>
+                                    </div>
+                                </div>
+                            `;
+                        }).join('')}
+                    </div>
+                </div>
+
+                <!-- Employee Rankings Section (Sharper Card) -->
+                <div class="bg-white rounded-2xl p-6 shadow-xl shadow-slate-200/60 border border-slate-50 flex flex-col h-full">
+                    <div class="mb-6">
+                        <h4 class="text-lg font-black text-slate-800">Top Performers</h4>
+                        <p class="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Efficiency Rankings</p>
+                    </div>
+                    
+                    <div class="space-y-4 flex-1 overflow-y-auto pr-2 custom-scrollbar">
+                        ${summary.employee_rankings.map((e, idx) => `
+                            <div class="flex items-center gap-4 p-4 rounded-2xl hover:bg-slate-50 transition-colors">
+                                <div class="relative">
+                                    <div class="w-11 h-11 rounded-full bg-indigo-50 border-2 border-white shadow-sm flex items-center justify-center font-black text-indigo-600 text-sm">${idx + 1}</div>
+                                    ${idx === 0 ? '<div class="absolute -top-2 -right-1 text-amber-500"><i data-lucide="crown" class="w-4 h-4 fill-current"></i></div>' : ''}
+                                </div>
+                                <div class="flex-1 min-w-0">
+                                    <h5 class="font-bold text-slate-800 truncate text-xs mb-0.5">${e.name}</h5>
+                                    <p class="text-[10px] text-slate-400 font-bold uppercase">${e.role}</p>
+                                </div>
+                                <div class="text-right">
+                                    <p class="text-sm font-black text-emerald-500">${e.efficiency}%</p>
+                                    <p class="text-[9px] font-bold text-slate-300 uppercase">${e.tasks_completed} Tasks</p>
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+            </div>
+
+            <!-- Notifications & Live Feed (Refined) -->
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
+                <div class="bg-white rounded-2xl p-6 shadow-xl shadow-slate-200/60 border border-slate-50">
+                    <h4 class="text-lg font-black text-slate-800 mb-5 flex items-center gap-2"><i data-lucide="bell-ring" class="text-rose-500 w-5 h-5"></i> Notifications</h4>
+                    <div class="max-h-80 overflow-y-auto custom-scrollbar pr-2">
+                        ${summary.notifications.map(n => `
+                            <div class="p-3 mb-2.5 rounded-xl border border-slate-50 hover:bg-slate-50 transition-colors flex items-center gap-3">
+                                <div class="w-1.5 h-1.5 rounded-full ${n.type === 'risk' ? 'bg-rose-500' : 'bg-amber-500'} shrink-0 animate-pulse"></div>
+                                <div class="flex-1 text-[11px] font-bold text-slate-700">${n.message}</div>
+                                <div class="text-[9px] font-black text-slate-300 uppercase">${n.time || 'Today'}</div>
+                            </div>
+                        `).join('')}
+                        ${summary.notifications.length === 0 ? '<p class="text-center text-slate-400 text-xs py-6 font-bold uppercase tracking-widest opacity-50">System Clear</p>' : ''}
+                    </div>
+                </div>
+
+                <div class="bg-white rounded-2xl p-6 shadow-xl shadow-slate-200/60 border border-slate-50">
+                    <h4 class="text-lg font-black text-slate-800 mb-5 flex items-center gap-2"><i data-lucide="activity" class="text-indigo-500 w-5 h-5"></i> Execution Stream</h4>
+                    <div class="max-h-80 overflow-y-auto custom-scrollbar pr-2 space-y-4">
+                        ${(state.dashboardData.feed.live_stream || []).map(item => `
+                            <div class="flex items-start gap-4 p-4 rounded-2xl bg-slate-50/50 hover:bg-slate-50 transition-colors">
+                                <div class="w-10 h-10 rounded-full bg-white shadow-sm flex items-center justify-center shrink-0">
+                                    <i data-lucide="${item.type === 'Engineering' ? 'terminal' : 'image'}" class="w-5 h-5 text-indigo-500"></i>
+                                </div>
+                                <div class="flex-1 min-w-0">
+                                    <p class="text-xs font-black text-slate-800 mb-0.5">${item.employee}</p>
+                                    <div class="text-[10px] text-slate-500 font-bold leading-relaxed">${item.details}</div>
+                                </div>
+                            </div>
+                        `).join('') || '<p class="text-center text-slate-400 text-sm py-8 font-bold uppercase tracking-widest opacity-50">Waiting for activity...</p>'}
+                    </div>
+                </div>
+            </div>
+        `;
+
+
+        return `
+            <style>
+                .custom-scrollbar::-webkit-scrollbar { width: 4px; }
+                .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+                .custom-scrollbar::-webkit-scrollbar-thumb { background-color: #cbd5e1; border-radius: 10px; }
+            </style>
+            
+            <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-6 mb-12 animate-in">
+                <div>
+                    <div class="flex items-center gap-2 mb-2">
+                        <div class="w-1.5 h-1.5 rounded-full bg-brand-primary animate-pulse"></div>
+                        <p class="text-[10px] font-black text-slate-400 uppercase tracking-[0.3em]">System Intel v3.1</p>
+                    </div>
+                    <h3 class="text-4xl font-black text-slate-900 tracking-tighter" id="dashboard-main-title">
+                        ${state.isDailyReportVisible ? 'Daily Work Report' : 'Executive Overview'}
+                    </h3>
+                </div>
+                <button onclick="toggleDailyReport()" class="group relative px-8 py-4 bg-slate-900 hover:bg-slate-800 text-white font-black text-sm rounded-[2rem] shadow-2xl shadow-slate-900/20 transition-all active:scale-95 flex items-center gap-3 overflow-hidden">
+                    <div class="absolute inset-0 bg-gradient-to-r from-brand-primary/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                    <i data-lucide="${state.isDailyReportVisible ? 'arrow-left' : 'bar-chart-3'}" class="w-5 h-5 relative z-10"></i> 
+                    <span id="toggle-report-btn-text" class="relative z-10">
+                        ${state.isDailyReportVisible ? 'Back to Overview' : 'View Daily Work Report'}
+                    </span>
+                </button>
+            </div>
+
+            <div id="main-dashboard-content" class="transition-all duration-700 ${state.isDailyReportVisible ? 'opacity-0 h-0 overflow-hidden' : 'opacity-100'}">
+                ${kpiHtml}
+                ${chartsHtml}
+                ${phase4Html}
+            </div>
+
+            <div id="daily-report-content" class="transition-all duration-700 ${state.isDailyReportVisible ? 'opacity-100' : 'opacity-0 h-0 overflow-hidden'}">
+                <div id="daily-report-dynamic-area">
+                    ${getDailyReportHtml()}
+                </div>
+            </div>
+        `;
+      }
+
+
+
+      async function toggleDailyReport() {
+        state.isDailyReportVisible = !state.isDailyReportVisible;
+        
+        // Re-render the app to ensure all dynamic text, icons, and transitions are synced
+        renderAdminApp();
+        
+        if (state.isDailyReportVisible) {
+          if (!state.dailyReportDataCache) {
+            await loadAndRenderDailyReport();
+          }
+        }
+      }
+
+      function getDailyReportHtml() {
+        const data = state.dailyReportDataCache;
+        if (!data) {
+            return `
+                <div class="h-64 flex flex-col items-center justify-center space-y-4 animate-pulse">
+                    <div class="relative">
+                        <div class="absolute inset-0 bg-brand-primary/10 blur-xl rounded-full animate-pulse"></div>
+                        <i data-lucide="loader-2" class="w-10 h-10 animate-spin text-brand-primary relative z-10"></i>
+                    </div>
+                    <div class="text-center">
+                        <p class="text-slate-800 font-black tracking-tighter text-xl mb-1">Analyzing Workspace Data</p>
+                        <p class="text-slate-400 font-medium text-xs">Synthesizing real-time productivity metrics...</p>
+                    </div>
+                </div>
+            `;
+        }
+
+        const kpis = [
+            { label: "Total Hours Logged", value: `${data.kpis.total_hours}h`, icon: "clock", color: "text-indigo-600", bg: "bg-indigo-50", grad: "premium-gradient-1" },
+            { label: "Workforce Presence", value: data.kpis.employees_present, icon: "user-check", color: "text-emerald-600", bg: "bg-emerald-50", grad: "premium-gradient-2" },
+            { label: "Average Utilization", value: `${data.kpis.utilization_percent}%`, icon: "zap", color: "text-amber-600", bg: "bg-amber-50", grad: "premium-gradient-4" },
+            { label: "Urgent Attention", value: data.kpis.attention_count, icon: "alert-octagon", color: "text-rose-600", bg: "bg-rose-50", grad: "premium-gradient-3" }
+        ];
+
+        const kpiHtml = `
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-12">
+                ${kpis.map((k, i) => `
+                    <div class="glass-card rounded-2xl p-5 shadow-sm border border-white/50 animate-in stagger-${i+1} card-hover relative overflow-hidden group">
+                        <div class="absolute top-0 right-0 -mr-4 -mt-4 w-20 h-20 ${k.bg} rounded-full opacity-50 group-hover:scale-110 transition-transform duration-500"></div>
+                        <div class="relative z-10">
+                            <div class="flex items-center gap-3 mb-3">
+                                <div class="p-2 rounded-lg ${k.bg} ${k.color}">
+                                    <i data-lucide="${k.icon}" class="w-4 h-4"></i>
+                                </div>
+                                <p class="text-[9px] font-black text-slate-400 uppercase tracking-[0.2em]">${k.label}</p>
+                            </div>
+                            <h3 class="text-3xl font-black text-slate-900 tracking-tighter">${k.value}</h3>
+                        </div>
+                    </div>
+                `).join('')}
+            </div>
+        `;
+
+        const employeeHtml = `
+            <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5 mb-10">
+                ${data.employees
+                  .map((e, i) => {
+                    const utilColor =
+                      e.utilization >= 100
+                        ? "bg-emerald-500 shadow-emerald-200"
+                        : e.utilization >= 80
+                          ? "bg-indigo-500 shadow-indigo-200"
+                          : "bg-rose-500 shadow-rose-200";
+                    
+                    const utilText = e.utilization >= 100 ? "Optimal" : e.utilization >= 80 ? "Steady" : "Underutilized";
+                    const utilBadge = e.utilization >= 100 ? "bg-emerald-50 text-emerald-600 border-emerald-100" : e.utilization >= 80 ? "bg-indigo-50 text-indigo-600 border-indigo-100" : "bg-rose-50 text-rose-600 border-rose-100";
+
+                    return `
+                        <div class="glass-card rounded-2xl p-6 shadow-sm border border-white/50 flex flex-col card-hover animate-in stagger-${(i%4)+1} relative group">
+                            <div class="flex justify-between items-start mb-5">
+                                <div>
+                                    <h4 class="font-black text-slate-900 text-lg tracking-tight mb-1">${e.name}</h4>
+                                    <span class="stat-pill ${utilBadge}">${utilText}</span>
+                                </div>
+                                <div class="text-right">
+                                    <p class="text-xl font-black text-brand-primary tracking-tighter">${e.hours}<span class="text-[10px] ml-0.5 text-slate-400">h</span></p>
+                                    <p class="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Logged</p>
+                                </div>
+                            </div>
+                            
+                            <div class="mb-6">
+                                <div class="flex justify-between items-end mb-1.5">
+                                    <span class="text-[10px] font-black text-slate-800 uppercase tracking-tighter">Utilization</span>
+                                    <span class="text-base font-black text-slate-900 tracking-tighter">${e.utilization}%</span>
+                                </div>
+                                <div class="w-full bg-slate-100 h-2.5 rounded-full overflow-hidden p-0.5 shadow-inner">
+                                    <div class="${utilColor} h-full rounded-full transition-all duration-1000 shadow-lg" style="width: ${Math.min(e.utilization, 100)}%"></div>
+                                </div>
+                            </div>
+
+                            <div class="flex-1 space-y-2">
+                                <p class="text-[9px] font-black text-slate-400 uppercase tracking-[0.2em] mb-1.5">Project Contributions</p>
+                                ${e.projects
+                                  .map(
+                                    (proj) => `
+                                    <div class="flex justify-between items-center px-3 py-2 bg-slate-50/50 hover:bg-white rounded-xl border border-slate-100 transition-colors group/proj">
+                                        <div class="flex items-center gap-2">
+                                            <div class="w-1 h-1 rounded-full bg-indigo-400"></div>
+                                            <span class="text-[11px] font-bold text-slate-600 group-hover/proj:text-slate-900 transition-colors">${proj.name}</span>
+                                        </div>
+                                        <span class="text-[11px] font-black text-indigo-600">${proj.hours}h</span>
+                                    </div>
+                                `,
+                                  )
+                                  .join("")}
+                            </div>
+                        </div>
+                    `;
+                  })
+                  .join("")}
+            </div>
+        `;
+
+        const projectHtml = `
+            <div class="mb-4">
+                <div class="flex items-center justify-between mb-6">
+                    <h4 class="text-xl font-black text-slate-900 tracking-tighter flex items-center gap-3">
+                        <div class="p-1.5 bg-indigo-100 text-indigo-600 rounded-lg">
+                            <i data-lucide="folder-kanban" class="w-5 h-5"></i>
+                        </div>
+                        Global Project Velocity
+                    </h4>
+                </div>
+                <div class="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6">
+                    ${data.project_overview
+                      .map((p, i) => {
+                        const gradients = [
+                          "from-indigo-600 to-violet-600",
+                          "from-emerald-500 to-teal-600",
+                          "from-rose-500 to-pink-600",
+                          "from-amber-500 to-orange-500",
+                          "from-blue-500 to-cyan-600",
+                        ];
+                        const grad = gradients[i % gradients.length];
+                        
+                        return `
+                        <div class="glass-card rounded-2xl overflow-hidden shadow-sm border border-white/50 transition-all card-hover animate-in stagger-${(i%4)+1} flex flex-col">
+                            <div class="bg-gradient-to-br ${grad} p-6 relative overflow-hidden group">
+                                <div class="absolute top-0 right-0 -mr-8 -mt-8 w-24 h-24 bg-white/10 rounded-full blur-2xl group-hover:scale-150 transition-transform duration-700"></div>
+                                <div class="relative z-10 flex justify-between items-center">
+                                    <h5 class="font-black text-white text-lg tracking-tight truncate pr-4 drop-shadow-md">${p.name}</h5>
+                                    <div class="bg-white/20 backdrop-blur-md px-3 py-1.5 rounded-xl shadow-xl border border-white/30">
+                                        <span class="font-black text-white text-base tracking-tighter">${p.share_percent}%</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="p-6 space-y-5">
+                                <div class="grid grid-cols-2 gap-3">
+                                    <div class="bg-slate-50 p-3 rounded-xl border border-slate-100">
+                                        <p class="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-0.5">Today</p>
+                                        <p class="text-lg font-black text-slate-900 tracking-tight">${p.today}h</p>
+                                    </div>
+                                    <div class="bg-slate-50 p-3 rounded-xl border border-slate-100">
+                                        <p class="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-0.5">Week</p>
+                                        <p class="text-lg font-black text-slate-900 tracking-tight">${p.week}h</p>
+                                    </div>
+                                    <div class="bg-slate-50 p-3 rounded-xl border border-slate-100">
+                                        <p class="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-0.5">Month</p>
+                                        <p class="text-lg font-black text-slate-900 tracking-tight">${p.month}h</p>
+                                    </div>
+                                    <div class="bg-slate-50 p-3 rounded-xl border border-slate-100">
+                                        <p class="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-0.5">Year</p>
+                                        <p class="text-lg font-black text-slate-900 tracking-tight">${p.year}h</p>
+                                    </div>
+                                </div>
+                                <div class="pt-4 border-t border-slate-100 flex justify-between items-center">
+                                    <div class="flex items-center gap-2">
+                                        <div class="w-7 h-7 rounded-full bg-brand-primary/10 flex items-center justify-center text-brand-primary">
+                                            <i data-lucide="infinity" class="w-3.5 h-3.5"></i>
+                                        </div>
+                                        <span class="text-[10px] font-black text-slate-400 uppercase tracking-widest">Lifetime Log</span>
+                                    </div>
+                                    <span class="text-2xl font-black text-brand-primary tracking-tighter">${p.life}<span class="text-xs ml-0.5">h</span></span>
+                                </div>
+                            </div>
+                        </div>
+                        `;
+                      })
+                      .join("")}
+                </div>
+            </div>
+        `;
+
+        return `
+            ${kpiHtml}
+            <div class="flex items-center justify-between mb-8">
+                <h4 class="text-2xl font-black text-slate-900 tracking-tighter flex items-center gap-3">
+                    <div class="p-2 bg-indigo-100 text-indigo-600 rounded-xl">
+                        <i data-lucide="users" class="w-6 h-6"></i>
+                    </div>
+                    Workforce Output
+                </h4>
+            </div>
+            ${employeeHtml}
+            ${projectHtml}
+        `;
+      }
+
+      function renderDailyReportFromCache() {
+        const dynamicArea = document.getElementById("daily-report-dynamic-area");
+        if (!dynamicArea) return;
+        dynamicArea.innerHTML = getDailyReportHtml();
+        if (window.lucide) lucide.createIcons();
+      }
+
+      async function loadAndRenderDailyReport() {
+        const dynamicArea = document.getElementById("daily-report-dynamic-area");
+        if (!dynamicArea) return;
+
+        if (!state.dailyReportDataCache) {
+          dynamicArea.innerHTML = `
+                <div class="h-64 flex flex-col items-center justify-center space-y-4">
+                    <i data-lucide="loader-2" class="w-8 h-8 animate-spin text-brand-primary"></i>
+                    <p class="text-slate-500 font-bold tracking-widest uppercase text-xs">Generating Report...</p>
+                </div>
+            `;
+          if (window.lucide) lucide.createIcons();
+        }
+
+        try {
+          const data = await apiFetch("/dashboard/daily-report");
+          state.dailyReportDataCache = data;
+          renderDailyReportFromCache();
+        } catch (error) {
+          console.error("Daily report fetch failed:", error);
+          dynamicArea.innerHTML = `
+                <div class="flex flex-col items-center justify-center p-12 text-rose-500">
+                    <i data-lucide="alert-circle" class="w-10 h-10 mb-4"></i>
+                    <p class="font-bold">Failed to load Daily Work Report.</p>
+                </div>
+            `;
+          if (window.lucide) lucide.createIcons();
+        }
+      }
+
+      function initDashboardCharts() {
+        const data = state.dashboardData?.summary;
+        if (!data || !data.charts) return;
+
+        const destroyChart = (id) => {
+            if (chartInstances[id]) chartInstances[id].destroy();
+        };
+
+        const revLimit = document.getElementById('revChartFilter')?.value === '6' ? 6 : 12;
+        const incLimit = document.getElementById('incChartFilter')?.value === '6' ? 6 : 12;
+        const profitYear = document.getElementById('profitChartYear')?.value || 'all';
+
+        const monthLabels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+        // 1. Total Revenue Chart (Bar)
+        destroyChart('revenue');
+        const ctxRev = document.getElementById('chartRevenue');
+        if (ctxRev && data.charts.monthly_revenue) {
+            chartInstances['revenue'] = new Chart(ctxRev, {
+                type: 'bar',
+                data: {
+                    labels: monthLabels.slice(0, revLimit),
+                    datasets: [{
+                        label: 'Revenue',
+                        data: data.charts.monthly_revenue.slice(0, revLimit),
+                        backgroundColor: '#4f46e5',
+                        borderRadius: 12,
+                        barThickness: 12
+                    }]
+                },
+                options: { 
+                    responsive: true, 
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: { backgroundColor: '#1e293b', titleFont: { weight: '900' }, bodyFont: { weight: '700' } }
+                    },
+                    scales: {
+                        y: { beginAtZero: true, grid: { display: true, color: '#f8fafc' }, ticks: { font: { weight: '700', size: 10 } } },
+                        x: { grid: { display: false }, ticks: { font: { weight: '700', size: 10 } } }
+                    }
+                }
+            });
+        }
+
+        // 2. Total Income vs Pending (Bar)
+        destroyChart('incPending');
+        const ctxInc = document.getElementById('chartIncomePending');
+        if (ctxInc && data.charts.monthly_income && data.charts.monthly_pending) {
+            chartInstances['incPending'] = new Chart(ctxInc, {
+                type: 'bar',
+                data: {
+                    labels: monthLabels.slice(0, incLimit),
+                    datasets: [
+                        { label: 'Income', data: data.charts.monthly_income.slice(0, incLimit), backgroundColor: '#10b981', borderRadius: 12, barThickness: 8 },
+                        { label: 'Pending', data: data.charts.monthly_pending.slice(0, incLimit), backgroundColor: '#f43f5e', borderRadius: 12, barThickness: 8 }
+                    ]
+                },
+                options: { 
+                    responsive: true, 
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { position: 'bottom', labels: { usePointStyle: true, padding: 20, font: { weight: '700', size: 10 } } },
+                        tooltip: { backgroundColor: '#1e293b' }
+                    },
+                    scales: {
+                        y: { beginAtZero: true, grid: { display: true, color: '#f8fafc' }, ticks: { font: { weight: '700', size: 10 } } },
+                        x: { grid: { display: false }, ticks: { font: { weight: '700', size: 10 } } }
+                    }
+                }
+            });
+        }
+
+        // 12. Dept P&L (Bar)
+        destroyChart('deptPl');
+        const ctxDept = document.getElementById('chartDeptPL');
+        if (ctxDept && data.charts.dept_pl) {
+            chartInstances['deptPl'] = new Chart(ctxDept, {
+                type: 'bar',
+                data: {
+                    labels: Object.keys(data.charts.dept_pl),
+                    datasets: [{
+                        label: 'Profit/Loss',
+                        data: Object.values(data.charts.dept_pl),
+                        backgroundColor: Object.values(data.charts.dept_pl).map(v => v >= 0 ? '#10b981' : '#f43f5e'),
+                        borderRadius: 8,
+                        barThickness: 20
+                    }]
+                },
+                options: { 
+                    responsive: true, 
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: { backgroundColor: '#1e293b' }
+                    },
+                    scales: {
+                        y: { beginAtZero: true, grid: { color: '#f8fafc' }, ticks: { font: { weight: '700', size: 10 } } },
+                        x: { grid: { display: false }, ticks: { font: { weight: '700', size: 10 } } }
+                    }
+                }
+            });
+        }
+
+        // 17. Yearly Profit Comparison (Line)
+        destroyChart('yearlyProfit');
+        const ctxProf = document.getElementById('chartYearlyProfit');
+        if (ctxProf && data.charts.yearly_profit) {
+            let datasets = [];
+            const colors = ['#6366f1', '#ec4899', '#f59e0b'];
+            let colorIdx = 0;
+            
+            for (let [year, profData] of Object.entries(data.charts.yearly_profit)) {
+                if (profitYear === 'all' || profitYear === year) {
+                    datasets.push({
+                        label: `Profit ${year}`,
+                        data: profData,
+                        borderColor: colors[colorIdx % colors.length],
+                        backgroundColor: colors[colorIdx % colors.length] + '20',
+                        tension: 0.4,
+                        fill: true,
+                        pointRadius: 4,
+                        pointBackgroundColor: '#fff',
+                        borderWidth: 3
+                    });
+                    colorIdx++;
+                }
+            }
+
+            chartInstances['yearlyProfit'] = new Chart(ctxProf, {
+                type: 'line',
+                data: {
+                    labels: monthLabels,
+                    datasets: datasets
+                },
+                options: { 
+                    responsive: true, 
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { position: 'bottom', labels: { usePointStyle: true, font: { weight: '700', size: 10 } } },
+                        tooltip: { backgroundColor: '#1e293b' }
+                    },
+                    scales: {
+                        y: { grid: { color: '#f8fafc' }, ticks: { font: { weight: '700', size: 10 } } },
+                        x: { grid: { display: false }, ticks: { font: { weight: '700', size: 10 } } }
+                    }
+                }
+            });
+        }
+      }
+
+// ==========================================
+      //         PHASE 3: ADMIN DATA TABLES
+      // ==========================================
+
+      // ==========================================
+      //         PHASE 6: CLIENT TRACKING
+      // ==========================================
+      function openClientDetails(clientId) {
+        state.activeClient = state.allClients.find((c) => c.id === clientId);
+        state.activeClientTab = "overview";
+        renderAdminApp();
+      }
+
+      function closeClientDetails() {
+        state.activeClient = null;
+        renderAdminApp();
+      }
+
+      function switchClientTab(activeTab) {
+        state.activeClientTab = activeTab;
+        renderAdminApp();
+      }
+
+      function getAdminClientsTemplate() {
+        if (state.activeClient) {
+          return getClientDetailsTemplate();
+        }
+        return getClientListTemplate();
+      }
+
+      function getClientListTemplate() {
+        let tbody = "";
+        const clients = Array.isArray(state.allClients) ? state.allClients : [];
+        if (clients.length === 0) {
+          tbody =
+            '<tr><td colspan="5" class="px-6 py-8 text-center text-slate-500">No clients found.</td></tr>';
+        } else {
+          tbody = clients
+            .map((client) => {
+              // Optimized extraction: Check for direct ID link OR fallback to name-matching
+              const clientProjects = state.allProjects.filter(
+                (p) => p.id === client.project_id || p.client === client.name,
+              );
+              const totalProjects = clientProjects.length;
+              const activeProjects = clientProjects.filter(
+                (p) => p.status === "In Progress" || p.status === "Active",
+              ).length;
+
+              return `
+                    <tr class="hover:bg-slate-50 border-b border-slate-100 last:border-0 cursor-pointer group" onclick="openClientDetails('${client.id}')">
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            <div class="text-sm font-bold text-slate-900 group-hover:text-brand-primary transition-colors">${client.name}</div>
+                            <div class="text-xs text-slate-500">${client.company !== "N/A" ? client.company : "--"}</div>
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            <div class="flex items-center text-sm text-slate-600"><i data-lucide="mail" class="w-3.5 h-3.5 mr-1.5 text-slate-400"></i> ${client.email || "--"}</div>
+                            <div class="flex items-center text-xs text-slate-500 mt-1"><i data-lucide="phone" class="w-3.5 h-3.5 mr-1.5 text-slate-400"></i> ${client.phone !== "N/A" ? client.phone : "--"}</div>
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-brand-50 text-brand-700 border border-brand-200">
+                                ${totalProjects} Projects
+                            </span>
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${activeProjects > 0 ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "bg-slate-100 text-slate-600 border border-slate-200"}">
+                                ${activeProjects} Active
+                            </span>
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                            <button class="text-brand-600 hover:text-brand-900 transition-colors p-1 hover:bg-brand-50 rounded"><i data-lucide="chevron-right" class="w-5 h-5"></i></button>
+                        </td>
+                    </tr>
+                    `;
+            })
+            .join("");
+        }
+
+        return `
+                <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+                    <div>
+                        <h3 class="text-2xl font-bold text-slate-900 tracking-tight">Client Tracking</h3>
+                        <p class="text-sm text-slate-500 mt-1">Manage client relationships and monitor project portfolios.</p>
+                    </div>
+                    <button onclick="openClientCreateModal()" class="inline-flex items-center px-4 py-2 bg-brand-primary hover:bg-indigo-700 text-white text-sm font-medium rounded-lg shadow-sm transition-colors focus:ring-2 focus:ring-offset-2 focus:ring-brand-primary">
+                        <i data-lucide="plus" class="w-4 h-4 mr-2"></i> New Client
+                    </button>
+                </div>
+
+                <div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+                    <div class="overflow-x-auto">
+                        <table class="min-w-full text-left border-collapse">
+                            <thead class="bg-white border-b border-slate-200">
+                                <tr>
+                                    <th class="py-3 px-6 text-xs font-semibold text-slate-500 uppercase tracking-wider">Client Name</th>
+                                    <th class="py-3 px-6 text-xs font-semibold text-slate-500 uppercase tracking-wider">Contact Info</th>
+                                    <th class="py-3 px-6 text-xs font-semibold text-slate-500 uppercase tracking-wider">Total Projects</th>
+                                    <th class="py-3 px-6 text-xs font-semibold text-slate-500 uppercase tracking-wider">Active Projects</th>
+                                    <th class="py-3 px-6 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">Details</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-slate-100 bg-white">
+                                ${tbody}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            `;
+      }
+
+      function getClientDetailsTemplate() {
+        const client = state.activeClient;
+        if (!client) return "";
+
+        const clientProjects = state.allProjects.filter(
+          (p) => p.id === client.project_id || p.client === client.name,
+        );
+        const activeProjectsCount = clientProjects.filter(
+          (p) => p.status === "In Progress" || p.status === "Active",
+        ).length;
+
+        // Tab Navigation Builder (Matching Project Style)
+        const tabs = [
+          { id: "overview", icon: "folder-kanban", label: "Project Portfolio" },
+          { id: "details", icon: "info", label: "Profile Information" },
+        ];
+
+        const tabsHtml = tabs
+          .map(
+            (t) => `
+                <button onclick="switchClientTab('${t.id}')" class="px-4 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap flex items-center gap-2 ${state.activeClientTab === t.id ? "border-brand-primary text-brand-primary" : "border-transparent text-slate-500 hover:text-slate-800 hover:border-slate-300"}">
+                    <i data-lucide="${t.icon}" class="w-4 h-4"></i> ${t.label}
+                </button>
+            `,
+          )
+          .join("");
+
+        let contentHtml = "";
+        if (state.activeClientTab === "overview")
+          contentHtml = getClientProjectsTab(client, clientProjects);
+        else if (state.activeClientTab === "details")
+          contentHtml = getClientProfileTab(client);
+
+        return `
+                <div class="mb-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <div class="flex items-center gap-4">
+                        <button onclick="closeClientDetails()" class="p-2.5 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors shadow-sm focus:outline-none">
+                            <i data-lucide="arrow-left" class="w-5 h-5 text-slate-600"></i>
+                        </button>
+                        <div>
+                            <div class="flex items-center gap-3">
+                                <h2 class="text-2xl font-bold text-slate-800 tracking-tight">${client.name}</h2>
+                                <span class="relative flex h-3 w-3" title="Status: ${activeProjectsCount > 0 ? "Active Projects" : "No Active Projects"}">
+                                  ${activeProjectsCount > 0 ? `<span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-500 opacity-75"></span>` : ""}
+                                  <span class="relative inline-flex rounded-full h-3 w-3 ${activeProjectsCount > 0 ? "bg-emerald-500" : "bg-slate-300"}"></span>
+                                </span>
+                            </div>
+                            <p class="text-sm text-slate-500 mt-0.5">
+                                <span class="font-medium text-slate-700">${client.company !== "N/A" ? client.company : "Individual Client"}</span> 
+                                &nbsp;|&nbsp; <i data-lucide="mail" class="w-3 h-3 inline-block mr-1"></i> ${client.email || "--"} 
+                                &nbsp;|&nbsp; <i data-lucide="phone" class="w-3 h-3 inline-block mr-1"></i> ${client.phone !== "N/A" ? client.phone : "--"}
+                            </p>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <button onclick="openClientEditModal('${client.id}')" class="px-4 py-2 bg-white border border-slate-200 text-slate-700 font-medium rounded-lg shadow-sm hover:bg-slate-50 transition-colors flex items-center gap-2">
+                            <i data-lucide="edit" class="w-4 h-4"></i> Edit Client
+                        </button>
+                    </div>
+                </div>
+
+                <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col min-h-[600px]">
+                    <div class="px-4 border-b border-slate-200 bg-slate-50/50 flex space-x-2 overflow-x-auto">
+                        ${tabsHtml}
+                    </div>
+                    <div class="p-6 flex-1 bg-slate-50/30">
+                        ${contentHtml}
+                    </div>
+                </div>
+            `;
+      }
+
+      function getClientProjectsTab(client, projects) {
+        let projectsHtml = "";
+        if (projects.length === 0) {
+          projectsHtml =
+            '<div class="text-center py-12 text-slate-500 bg-slate-50 rounded-lg border border-slate-100"><i data-lucide="folder-open" class="w-10 h-10 mx-auto mb-3 opacity-20"></i> No projects found for this client.</div>';
+        } else {
+          projectsHtml = projects
+            .map(
+              (p) => `
+                    <div class="flex items-center justify-between p-5 bg-white border border-slate-200 rounded-xl shadow-sm hover:border-brand-300 hover:shadow-md transition-all cursor-pointer group" onclick="routeApp('projects'); setTimeout(()=>openProjectDetails('${p.id}'), 100);">
+                        <div class="flex items-center gap-4">
+                            <div class="w-10 h-10 rounded-lg bg-slate-50 text-slate-400 flex items-center justify-center group-hover:bg-brand-50 group-hover:text-brand-primary transition-colors">
+                                <i data-lucide="layout"></i>
+                            </div>
+                            <div>
+                                <h4 class="text-sm font-bold text-slate-900 group-hover:text-brand-primary transition-colors">${p.name || p.project_name}</h4>
+                                <p class="text-xs text-slate-500 mt-0.5">Lead: ${p.manager || "Unassigned"}</p>
+                            </div>
+                        </div>
+                        <div class="text-right">
+                            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold ${p.status === "Completed" ? "bg-emerald-50 text-emerald-700 border-emerald-200" : p.status === "In Progress" || p.status === "Active" ? "bg-blue-50 text-blue-700 border-blue-200" : "bg-slate-100 text-slate-700 border-slate-200"} border">
+                                ${p.status}
+                            </span>
+                            <div class="text-xs font-bold text-slate-900 mt-1.5">₹${formatNumber(p.budget || p.total_cost || 0)}</div>
+                        </div>
+                    </div>
+                `,
+            )
+            .join("");
+        }
+
+        return `
+                <div class="space-y-6">
+                    <div class="flex items-center justify-between mb-2">
+                        <h3 class="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
+                            <i data-lucide="bar-chart-3" class="w-4 h-4 text-brand-primary"></i> Client Project Portfolio
+                        </h3>
+                    </div>
+                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+                        ${projectsHtml}
+                    </div>
+                </div>
+            `;
+      }
+
+      function getClientProfileTab(client) {
+        return `
+                <div class="space-y-8 animate-in fade-in slide-in-from-bottom-2 duration-300">
+                    <div>
+                        <h3 class="text-sm font-bold text-slate-900 uppercase tracking-wider mb-6 flex items-center gap-2">
+                            <i data-lucide="user-check" class="w-4 h-4 text-brand-primary"></i> Identity & Contact
+                        </h3>
+                        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+                            <div class="bg-white p-5 rounded-xl border border-slate-100 shadow-sm">
+                                <p class="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5">Client ID</p>
+                                <p class="text-xs font-mono text-slate-500 break-all select-all">${client.id}</p>
+                            </div>
+                            <div class="bg-white p-5 rounded-xl border border-slate-100 shadow-sm">
+                                <p class="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5">Company Name</p>
+                                <p class="text-base font-bold text-slate-900">${client.company !== "N/A" ? client.company : "--"}</p>
+                            </div>
+                            <div class="bg-white p-5 rounded-xl border border-slate-100 shadow-sm">
+                                <p class="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5">Primary Email</p>
+                                <p class="text-base font-bold text-brand-primary">${client.email || "--"}</p>
+                            </div>
+                            <div class="bg-white p-5 rounded-xl border border-slate-100 shadow-sm">
+                                <p class="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5">Contact Phone</p>
+                                <p class="text-base font-bold text-slate-900">${client.phone !== "N/A" ? client.phone : "--"}</p>
+                            </div>
+                            <div class="bg-white p-5 rounded-xl border border-slate-100 shadow-sm">
+                                <p class="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5">Relationship Since</p>
+                                <p class="text-base font-bold text-slate-900">${new Date(client.created_at).toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" })}</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div>
+                        <h3 class="text-sm font-bold text-slate-900 uppercase tracking-wider mb-6 flex items-center gap-2">
+                            <i data-lucide="map-pin" class="w-4 h-4 text-brand-primary"></i> Physical Address
+                        </h3>
+                        <div class="bg-white p-6 rounded-xl border border-slate-100 shadow-sm">
+                            <p class="text-sm font-medium text-slate-700 whitespace-pre-wrap leading-relaxed">${client.address !== "N/A" ? client.address : "No address details provided."}</p>
+                        </div>
+                    </div>
+                </div>
+            `;
+      }
+
+      function openClientEditModal(clientId) {
+        const client = state.allClients.find((c) => c.id === clientId);
+        if (!client) return;
+
+        const formHtml = `
+                <form onsubmit="handleClientUpdate(event, '${client.id}')" class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-semibold text-slate-700 mb-1">Client Name *</label>
+                        <input type="text" id="edit_client_name" required value="${client.name}" class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-semibold text-slate-700 mb-1">Company / Organization</label>
+                        <input type="text" id="edit_client_company" value="${client.company !== "N/A" ? client.company : ""}" class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm">
+                    </div>
+                    <div class="grid grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-sm font-semibold text-slate-700 mb-1">Email</label>
+                            <input type="email" id="edit_client_email" value="${client.email || ""}" class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-semibold text-slate-700 mb-1">Phone</label>
+                            <input type="text" id="edit_client_phone" value="${client.phone !== "N/A" ? client.phone : ""}" class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm">
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-semibold text-slate-700 mb-1">Physical Address</label>
+                        <textarea id="edit_client_address" rows="3" class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm">${client.address !== "N/A" ? client.address : ""}</textarea>
+                    </div>
+                    <div id="editClientErrorBanner" class="hidden bg-rose-50 border border-rose-200 text-brand-alert px-4 py-3 rounded-lg text-sm items-start shadow-sm mt-4">
+                        <i data-lucide="alert-circle" class="w-4 h-4 mr-2 mt-0.5 flex-shrink-0"></i>
+                        <span id="editClientErrorMessage">Error message</span>
+                    </div>
+                    <div class="mt-6 flex justify-end gap-3 pt-4 border-t border-slate-100">
+                        <button type="button" onclick="closeModal()" class="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg font-medium transition-colors">Cancel</button>
+                        <button type="submit" id="btnUpdateClient" class="px-5 py-2 bg-brand-primary text-white rounded-lg font-medium shadow-sm hover:bg-indigo-700 transition-all flex items-center gap-2">
+                            <i data-lucide="save" class="w-4 h-4"></i> Save Changes
+                        </button>
+                    </div>
+                </form>
+            `;
+        openModal("Edit Client Details", formHtml);
+      }
+
+      async function handleClientUpdate(event, clientId) {
+        event.preventDefault();
+        const btn = document.getElementById("btnUpdateClient");
+        const originalText = btn.innerHTML;
+        btn.innerHTML =
+          '<i data-lucide="loader-2" class="w-4 h-4 mr-2 animate-spin"></i> Updating...';
+        btn.disabled = true;
+        document
+          .getElementById("editClientErrorBanner")
+          .classList.add("hidden");
+
+        try {
+          const payload = {
+            name: document.getElementById("edit_client_name").value,
+            company:
+              document.getElementById("edit_client_company").value || "N/A",
+            email: document.getElementById("edit_client_email").value || null,
+            phone: document.getElementById("edit_client_phone").value || "N/A",
+            address:
+              document.getElementById("edit_client_address").value || "N/A",
+          };
+
+          const response = await apiFetch(`/clients/update/${clientId}`, {
+            method: "PUT",
+            body: payload,
+          });
+
+          // Update local state
+          const index = state.allClients.findIndex((c) => c.id === clientId);
+          if (index !== -1) {
+            state.allClients[index] = response;
+          }
+          state.activeClient = response;
+
+          showToast("Client updated successfully", "success");
+          closeModal();
+          renderAdminApp();
+        } catch (err) {
+          document.getElementById("editClientErrorMessage").innerText =
+            err.message;
+          document
+            .getElementById("editClientErrorBanner")
+            .classList.remove("hidden");
+          document
+            .getElementById("editClientErrorBanner")
+            .classList.add("flex");
+        } finally {
+          btn.innerHTML = originalText;
+          btn.disabled = false;
+          lucide.createIcons();
+        }
+      }
+
+      // --- PHASE 5: PROJECT ROUTER ---
+      function getAdminProjectsTemplate() {
+        if (state.activeProject) {
+          return getProjectCommandCenterTemplate();
+        }
+        return getProjectListTemplate();
+      }
+
+      function getProjectListTemplate() {
+        return `
+                <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+                    <div>
+                        <h3 class="text-2xl font-bold text-slate-900 tracking-tight">Project Directory</h3>
+                        <p class="text-sm text-slate-500 mt-1">Manage all client projects, budgets, and operational statuses.</p>
+                    </div>
+                    ${
+                      state.user?.access_level !== "HRAdmin"
+                        ? `<button onclick="openProjectModal()" class="inline-flex items-center px-4 py-2 bg-brand-primary hover:bg-indigo-700 text-white text-sm font-medium rounded-lg shadow-sm transition-colors focus:ring-2 focus:ring-offset-2 focus:ring-brand-primary">
+                        <i data-lucide="plus" class="w-4 h-4 mr-2"></i> New Project
+                    </button>`
+                        : ""
+                    }
+                </div>
+                
+                <div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+                    <div class="p-4 border-b border-slate-200 flex flex-col sm:flex-row items-center justify-between bg-slate-50/50 gap-4">
+                        <div class="flex space-x-2 overflow-x-auto w-full sm:w-auto p-1 bg-slate-100 rounded-lg border border-slate-200" id="projectFilterContainer">
+                            <button onclick="setProjectFilter('All', this)" class="px-4 py-1.5 text-sm font-medium rounded-md shadow-sm bg-white text-brand-primary transition-all whitespace-nowrap">All Projects</button>
+                            <button onclick="setProjectFilter('Planning', this)" class="px-4 py-1.5 text-sm font-medium text-slate-600 hover:text-slate-900 rounded-md transition-all whitespace-nowrap">Planning</button>
+                            <button onclick="setProjectFilter('In Progress', this)" class="px-4 py-1.5 text-sm font-medium text-slate-600 hover:text-slate-900 rounded-md transition-all whitespace-nowrap">Active</button>
+                            <button onclick="setProjectFilter('Completed', this)" class="px-4 py-1.5 text-sm font-medium text-slate-600 hover:text-slate-900 rounded-md transition-all whitespace-nowrap">Completed</button>
+                        </div>
+                        <div class="w-full sm:w-72 relative">
+                            <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                                <i data-lucide="search" class="w-4 h-4 text-slate-400"></i>
+                            </div>
+                            <input type="text" onkeyup="updateProjectSearch(this.value)" placeholder="Search projects by name, client..." class="block w-full pl-10 pr-3 py-2 border border-slate-300 rounded-lg bg-white text-slate-900 focus:ring-2 focus:ring-brand-primary sm:text-sm transition-all outline-none">
+                        </div>
+                    </div>
+                    
+                    <div class="overflow-x-auto">
+                        <table class="min-w-full text-left border-collapse">
+                            <thead class="bg-white border-b border-slate-200">
+                                <tr>
+                                    <th class="py-3 px-6 text-xs font-semibold text-slate-500 uppercase tracking-wider">Project Name</th>
+                                    <th class="py-3 px-6 text-xs font-semibold text-slate-500 uppercase tracking-wider">Client</th>
+                                    <th class="py-3 px-6 text-xs font-semibold text-slate-500 uppercase tracking-wider">Manager</th>
+                                    <th class="py-3 px-6 text-xs font-semibold text-slate-500 uppercase tracking-wider">Budget / Cost</th>
+                                    <th class="py-3 px-6 text-xs font-semibold text-slate-500 uppercase tracking-wider">Progress</th>
+                                    <th class="py-3 px-6 text-xs font-semibold text-slate-500 uppercase tracking-wider">Status</th>
+                                    <th class="py-3 px-6 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="admin-projects-tbody" class="divide-y divide-slate-100 bg-white">
+                                <tr><td colspan="7" class="px-6 py-8 text-center text-slate-500"><i data-lucide="loader-2" class="w-6 h-6 animate-spin mx-auto mb-2 text-brand-primary"></i>Loading projects...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            `;
+      }
+
+      function setProjectFilter(filter, btn) {
+        state.projectFilter = filter;
+        if (btn) {
+          const container = btn.parentElement;
+          container.querySelectorAll("button").forEach((b) => {
+            b.className =
+              "px-4 py-1.5 text-sm font-medium text-slate-600 hover:text-slate-900 rounded-md transition-all whitespace-nowrap";
+          });
+          btn.className =
+            "px-4 py-1.5 text-sm font-medium rounded-md shadow-sm bg-white text-brand-primary transition-all whitespace-nowrap";
+        }
+        renderAdminProjectsTable();
+      }
+
+      function updateProjectSearch(term) {
+        state.projectSearchTerm = term.toLowerCase();
+        renderAdminProjectsTable();
+      }
+
+      function renderAdminProjectsTable() {
+        const tbody = document.getElementById("admin-projects-tbody");
+        if (!tbody) return;
+
+        const filtered = state.allProjects.filter((p) => {
+          const searchMatch =
+            (p.name &&
+              p.name.toLowerCase().includes(state.projectSearchTerm)) ||
+            (p.client &&
+              p.client.toLowerCase().includes(state.projectSearchTerm)) ||
+            (p.manager &&
+              p.manager.toLowerCase().includes(state.projectSearchTerm));
+
+          let filterMatch = true;
+          if (state.projectFilter !== "All") {
+            if (
+              state.projectFilter === "In Progress" ||
+              state.projectFilter === "Active"
+            ) {
+              filterMatch = p.status === "In Progress" || p.status === "Active";
+            } else {
+              filterMatch = p.status === state.projectFilter;
+            }
+          }
+          return searchMatch && filterMatch;
+        });
+
+        if (filtered.length === 0) {
+          tbody.innerHTML =
+            '<tr><td colspan="7" class="px-6 py-12 text-center text-slate-500"><div class="mx-auto w-16 h-16 bg-slate-50 rounded-full flex items-center justify-center mb-3"><i data-lucide="folder-open" class="w-8 h-8 text-slate-400"></i></div><p class="font-medium text-slate-900">No projects found</p><p class="text-xs">Adjust your filters or create a new project.</p></td></tr>';
+          lucide.createIcons();
+          return;
+        }
+
+        const formatCurrencyLocal = (amount) => {
+          if (amount === null || amount === undefined) return "₹0";
+          return new Intl.NumberFormat("en-IN", {
+            style: "currency",
+            currency: "INR",
+            maximumFractionDigits: 0,
+          }).format(amount);
+        };
+
+        const getInitials = (name) =>
+          name && name !== "N/A"
+            ? name
+                .split(" ")
+                .map((n) => n[0])
+                .join("")
+                .substring(0, 2)
+                .toUpperCase()
+            : "U";
+
+        tbody.innerHTML = filtered
+          .map((p) => {
+            let statusBadge = "";
+            const stat = p.status || "Planning";
+
+            if (stat === "In Progress" || stat === "Active") {
+              statusBadge = `<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-50 text-blue-700 border border-blue-200"><span class="w-1.5 h-1.5 mr-1.5 bg-blue-500 rounded-full"></span>In Progress</span>`;
+            } else if (stat === "Completed") {
+              statusBadge = `<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-emerald-50 text-emerald-700 border border-emerald-200"><span class="w-1.5 h-1.5 mr-1.5 bg-emerald-500 rounded-full"></span>Completed</span>`;
+            } else if (stat === "At Risk") {
+              statusBadge = `<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-amber-50 text-amber-700 border border-amber-200"><span class="w-1.5 h-1.5 mr-1.5 bg-amber-500 rounded-full animate-pulse"></span>At Risk</span>`;
+            } else {
+              statusBadge = `<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-700 border border-slate-200"><span class="w-1.5 h-1.5 mr-1.5 bg-slate-500 rounded-full"></span>${stat}</span>`;
+            }
+
+            const prog = p.progress && p.progress !== "N/A" ? p.progress : "0%";
+            const budgetVal = p.budget || 0;
+            const clientCostVal = p.client_cost || 0;
+
+            return `
+                <tr class="hover:bg-slate-50 transition-colors group cursor-pointer" onclick="openProjectDetails('${p.id}')">
+                    <td class="py-4 px-6 whitespace-nowrap">
+                        <div class="flex flex-col">
+                            <span class="text-sm font-semibold text-slate-900">${p.name !== "N/A" ? p.name : "Unnamed"}</span>
+                            <span class="text-xs text-slate-500 mt-0.5">${p.cost_type && p.cost_type !== "N/A" ? p.cost_type : "General Project"}</span>
+                        </div>
+                    </td>
+                    <td class="py-4 px-6 whitespace-nowrap text-sm text-slate-600">${p.client !== "N/A" ? p.client : "--"}</td>
+                    <td class="py-4 px-6 whitespace-nowrap">
+                        <div class="flex items-center">
+                            <div class="w-6 h-6 rounded-full bg-brand-100 text-brand-700 flex items-center justify-center text-[10px] font-bold mr-2">
+                                ${getInitials(p.manager)}
+                            </div>
+                            <span class="text-sm text-slate-700 font-medium">${p.manager !== "N/A" ? p.manager : "Unassigned"}</span>
+                        </div>
+                    </td>
+                    <td class="py-4 px-6 whitespace-nowrap">
+                        <div class="flex flex-col">
+                            <span class="text-sm font-medium text-slate-900">${formatCurrencyLocal(budgetVal)}</span>
+                            <span class="text-[10px] text-slate-500 font-normal mt-0.5">Cost: ${formatCurrencyLocal(clientCostVal)}</span>
+                        </div>
+                    </td>
+                    <td class="py-4 px-6 whitespace-nowrap">
+                        <div class="flex items-center w-28">
+                            <span class="text-xs font-medium text-slate-700 w-8">${prog}</span>
+                            <div class="flex-1 h-1.5 bg-slate-200 rounded-full ml-2 overflow-hidden">
+                                <div class="h-1.5 bg-brand-primary rounded-full transition-all duration-500" style="width: ${prog}"></div>
+                            </div>
+                        </div>
+                    </td>
+                    <td class="py-4 px-6 whitespace-nowrap">
+                        <div class="flex flex-col">
+                            <span class="text-xs font-bold ${p.payment_status === 'Paid in Full' ? 'text-emerald-600' : p.payment_status === 'Partial' ? 'text-amber-600' : 'text-rose-600'}">${p.payment_status || 'Unpaid'}</span>
+                            <span class="text-[10px] text-slate-500 mt-0.5">${formatCurrencyLocal(p.pending_amount || 0)} Pending</span>
+                        </div>
+                    </td>
+                    <td class="py-4 px-6 whitespace-nowrap text-right text-sm font-medium">
+                        <div class="flex justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                            <button onclick="event.stopPropagation(); openProjectModal('${p.id}')" class="text-slate-400 hover:text-brand-primary p-1.5 bg-white border border-slate-200 rounded shadow-sm transition-colors" title="Edit">
+                                <i data-lucide="edit-2" class="w-4 h-4"></i>
+                            </button>
+                            <button onclick="event.stopPropagation(); confirmDeleteProject('${p.id}')" class="text-slate-400 hover:text-brand-alert p-1.5 bg-white border border-slate-200 rounded shadow-sm transition-colors" title="Delete">
+                                <i data-lucide="trash-2" class="w-4 h-4"></i>
+                            </button>
+                        </div>
+                    </td>
+                </tr>
+                `;
+          })
+          .join("");
+        lucide.createIcons();
+      }
+
+      // ==========================================
+      //  PHASE 5: PROJECT COMMAND CENTER LOGIC
+      // ==========================================
+
+      async function openProjectDetails(projectId) {
+        // Force strict string matching to prevent integer/string type conflicts
+        const p = state.allProjects.find(
+          (x) => String(x.id) === String(projectId),
+        );
+        if (!p) return;
+
+        // ARCHITECTURE FIX: Keep the active tab if we are just refreshing the same project
+        if (
+          !state.activeProject ||
+          String(state.activeProject.id) !== String(projectId)
+        ) {
+          state.activeProjectTab = "overview";
+        }
+
+        state.activeProject = p;
+
+        try {
+          // Fetch assignments, timelines, expenses, and real SRS dynamically
+          const [assignRes, timelineRes, srsRes, expenseRes, paymentRes] =
+            await Promise.all([
+              apiFetch(`/projects/assignments/${projectId}`).catch(() => []),
+              apiFetch(`/projects/timeline/${projectId}`).catch(() => []),
+              apiFetch(`/projects/srs/get_by_project/${projectId}`).catch(
+                () => [],
+              ),
+              apiFetch(`/projects/expenses/${projectId}`).catch(() => []),
+              apiFetch(`/projects/payments/${projectId}`).catch(() => []),
+            ]);
+          state.projectAssignments = Array.isArray(assignRes) ? assignRes : [];
+          state.projectTimeline = Array.isArray(timelineRes) ? timelineRes : [];
+          state.projectSRS = Array.isArray(srsRes) ? srsRes : [];
+          state.projectExpenses = Array.isArray(expenseRes) ? expenseRes : [];
+          state.activeProjectPayments = Array.isArray(paymentRes) ? paymentRes : [];
+          state.activeSrsId = null; // Reset viewer
+        } catch (err) {
+          console.error("Failed to fetch project details:", err);
+          state.projectAssignments = [];
+          state.projectTimeline = [];
+          state.projectSRS = [];
+          state.projectExpenses = [];
+          state.activeProjectPayments = [];
+        }
+
+        renderAdminApp();
+      }
+
+      function closeProjectDetails() {
+        state.activeProject = null;
+        state.activeProjectTab = "overview";
+        renderAdminApp();
+      }
+
+      function switchProjectTab(tabName) {
+        state.activeProjectTab = tabName;
+        renderAdminApp();
+      }
+
+      function getProjectCommandCenterTemplate() {
+        const p = state.activeProject;
+        const pTasks = state.allTasks.filter((t) => t.project_id === p.id);
+
+        let statusColor = "bg-slate-500";
+        if (p.status === "In Progress" || p.status === "Active")
+          statusColor = "bg-blue-500";
+        if (p.status === "At Risk") statusColor = "bg-amber-500";
+        if (p.status === "Completed") statusColor = "bg-emerald-500";
+
+        // Tab Navigation Builder
+        const tabs = [
+          { id: "overview", icon: "pie-chart", label: "Overview" },
+          { id: "team", icon: "users", label: "Team & Assignments" },
+          { id: "timeline", icon: "clock", label: "Timeline" },
+          { id: "tasks", icon: "list-checks", label: "Task Ledger" },
+          { id: "srs", icon: "file-text", label: "SRS & Docs" },
+          { id: "expenses", icon: "dollar-sign", label: "Expenses" },
+          { id: "payments", icon: "indian-rupee", label: "Payments" },
+        ];
+
+        const tabsHtml = tabs
+          .map(
+            (t) => `
+                <button onclick="switchProjectTab('${t.id}')" class="px-4 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap flex items-center gap-2 ${state.activeProjectTab === t.id ? "border-brand-primary text-brand-primary" : "border-transparent text-slate-500 hover:text-slate-800 hover:border-slate-300"}">
+                    <i data-lucide="${t.icon}" class="w-4 h-4"></i> ${t.label}
+                </button>
+            `,
+          )
+          .join("");
+
+        let contentHtml = "";
+        if (state.activeProjectTab === "overview")
+          contentHtml = getProjectOverviewTab(p, pTasks);
+        else if (state.activeProjectTab === "team")
+          contentHtml = getProjectTeamTab(p);
+        else if (state.activeProjectTab === "timeline")
+          contentHtml = getProjectTimelineTab(p, pTasks);
+        else if (state.activeProjectTab === "tasks")
+          contentHtml = getProjectTasksTab(pTasks);
+        else if (state.activeProjectTab === "srs")
+          contentHtml = getProjectSRSTab(p);
+        else if (state.activeProjectTab === "expenses")
+          contentHtml = getProjectExpensesTab(p);
+        else if (state.activeProjectTab === "payments")
+          contentHtml = getProjectPaymentsTab(p);
+
+        return `
+                <div class="mb-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <div class="flex items-center gap-4">
+                        <button onclick="closeProjectDetails()" class="p-2.5 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors shadow-sm focus:outline-none">
+                            <i data-lucide="arrow-left" class="w-5 h-5 text-slate-600"></i>
+                        </button>
+                        <div>
+                            <div class="flex items-center gap-3">
+                                <h2 class="text-2xl font-bold text-slate-800 tracking-tight">${p.name}</h2>
+                                <span class="relative flex h-3 w-3" title="Status: ${p.status}">
+                                  ${p.status === "In Progress" || p.status === "Active" ? `<span class="animate-ping absolute inline-flex h-full w-full rounded-full ${statusColor} opacity-75"></span>` : ""}
+                                  <span class="relative inline-flex rounded-full h-3 w-3 ${statusColor}"></span>
+                                </span>
+                            </div>
+                            <p class="text-sm text-slate-500 mt-0.5"><span class="font-medium text-slate-700">Client:</span> ${p.client !== "N/A" ? p.client : "Internal"} &nbsp;|&nbsp; <span class="font-medium text-slate-700">Manager:</span> ${p.manager}</p>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <button onclick="event.stopPropagation(); openProjectModal('${p.id}')" class="px-4 py-2 bg-white border border-slate-200 text-slate-700 font-medium rounded-lg shadow-sm hover:bg-slate-50 transition-colors flex items-center gap-2">
+                            <i data-lucide="edit" class="w-4 h-4"></i> Edit Settings
+                        </button>
+                        <button onclick="markProjectComplete('${p.id}')" class="px-4 py-2 bg-emerald-600 text-white font-medium rounded-lg shadow-sm hover:bg-emerald-700 transition-colors flex items-center gap-2">
+                            <i data-lucide="check-circle" class="w-4 h-4"></i> Mark Complete
+                        </button>
+                    </div>
+                </div>
+
+                <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col min-h-[600px]">
+                    <div class="px-4 border-b border-slate-200 bg-slate-50/50 flex space-x-2 overflow-x-auto">
+                        ${tabsHtml}
+                    </div>
+                    <div class="p-6 flex-1 bg-slate-50/30">
+                        ${contentHtml}
+                    </div>
+                </div>
+            `;
+      }
+
+      async function markProjectComplete(projectId) {
+        const isConfirmed = await customConfirm(
+          "Complete Project",
+          "Are you sure you want to mark this project as Completed?",
+          "Complete",
+          "Cancel",
+          false,
+        );
+        if (!isConfirmed) return;
+        try {
+          await apiFetch(`/projects/update/${projectId}`, {
+            method: "PUT",
+            body: { status: "Completed", progress: "100%" },
+          });
+          showToast("Project marked as completed!", "success");
+          await loadAdminWorkspaceData();
+          await openProjectDetails(projectId);
+        } catch (err) {
+          showToast("Failed to update project: " + err.message, "error");
+        }
+      }
+
+      // Sub-Tab: Overview
+      function getProjectOverviewTab(p, tasks) {
+        let totalCost = 0,
+          totalBilled = 0,
+          totalHours = 0;
+        let employeeStats = {};
+
+        tasks.forEach((t) => {
+          const cost = parseFloat(t.employee_cost || 0);
+          const billed = parseFloat(t.billing_amount || 0);
+          const profit = billed - cost;
+
+          totalCost += cost;
+          totalBilled += billed;
+          totalHours += parseFloat(t.hours_logged || 0);
+
+          if (!employeeStats[t.employee_id]) {
+            const emp = state.allEmployees.find((e) => e.id === t.employee_id);
+            employeeStats[t.employee_id] = {
+              name: emp ? emp.full_name : "Unknown",
+              profit: 0,
+              billed: 0,
+            };
+          }
+          employeeStats[t.employee_id].profit += profit;
+          employeeStats[t.employee_id].billed += billed;
+        });
+
+        let extraExpenses = 0;
+        if (state.projectExpenses && state.projectExpenses.length > 0) {
+          state.projectExpenses.forEach((e) => {
+            extraExpenses += parseFloat(e.amount || 0);
+          });
+        }
+
+        const employeeCost = totalCost;
+        totalCost += extraExpenses; // True total cost
+
+        const clientCost = parseFloat(p.client_cost || 0);
+        const actualRevenue = clientCost > 0 ? clientCost : totalBilled;
+
+        const profit = actualRevenue - totalCost;
+        const margin =
+          actualRevenue > 0 ? ((profit / actualRevenue) * 100).toFixed(1) : 0;
+        const budget = parseFloat(p.budget || 0);
+        const burnPct =
+          budget > 0 ? ((totalCost / budget) * 100).toFixed(1) : 0;
+
+        // --- ENHANCEMENTS: Metrics & Alerts --- //
+        const employeesAssignedCount = state.projectAssignments
+          ? state.projectAssignments.length
+          : 0;
+        const totalTasksLogged = tasks.length;
+
+        let alertsHtml = "";
+
+        // 1. SRS Alert
+        if (!state.projectSRS || state.projectSRS.length === 0) {
+          alertsHtml += `
+                    <div class="flex items-start gap-3 p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-800 shadow-sm">
+                        <i data-lucide="file-warning" class="w-5 h-5 shrink-0 mt-0.5"></i>
+                        <div>
+                            <h4 class="text-sm font-bold tracking-tight">Missing SRS Documentation</h4>
+                            <p class="text-xs mt-1">No Software Requirements Specification (SRS) uploaded. Upload it in the 'SRS & Docs' tab.</p>
+                        </div>
+                    </div>
+                `;
+        }
+
+        // 2. Deadline Alert
+        let daysRemainingText = "N/A";
+        if (p.end_date && p.status !== "Completed") {
+          const today = new Date();
+          const endDate = new Date(p.end_date);
+          const diffTime = endDate - today;
+          const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+          daysRemainingText = diffDays + " Days";
+
+          if (diffDays < 0) {
+            alertsHtml += `
+                        <div class="flex items-start gap-3 p-3 bg-rose-50 border border-rose-200 rounded-lg text-rose-800 shadow-sm">
+                            <i data-lucide="calendar-x" class="w-5 h-5 shrink-0 mt-0.5"></i>
+                            <div>
+                                <h4 class="text-sm font-bold tracking-tight">Project Overdue</h4>
+                                <p class="text-xs mt-1">The project deadline (${endDate.toLocaleDateString()}) has passed by ${Math.abs(diffDays)} days.</p>
+                            </div>
+                        </div>
+                    `;
+          } else if (diffDays <= 14) {
+            alertsHtml += `
+                        <div class="flex items-start gap-3 p-3 bg-orange-50 border border-orange-200 rounded-lg text-orange-800 shadow-sm">
+                            <i data-lucide="clock" class="w-5 h-5 shrink-0 mt-0.5"></i>
+                            <div>
+                                <h4 class="text-sm font-bold tracking-tight">Nearing Deadline</h4>
+                                <p class="text-xs mt-1">Only ${diffDays} days remaining until the deadline (${endDate.toLocaleDateString()}).</p>
+                            </div>
+                        </div>
+                    `;
+          }
+        }
+
+        // 3. Budget Risk Alert
+        if (budget > 0) {
+          if (totalCost > budget) {
+            alertsHtml += `
+                        <div class="flex items-start gap-3 p-3 bg-rose-50 border border-rose-200 rounded-lg text-rose-800 shadow-sm">
+                            <i data-lucide="alert-octagon" class="w-5 h-5 shrink-0 mt-0.5"></i>
+                            <div>
+                                <h4 class="text-sm font-bold tracking-tight">Project At Risk: Over Budget</h4>
+                                <p class="text-xs mt-1">Accumulated cost (${formatCurrency(totalCost)}) has exceeded the allocated budget (${formatCurrency(budget)}).</p>
+                            </div>
+                        </div>
+                    `;
+          } else if (totalCost > budget * 0.8) {
+            alertsHtml += `
+                        <div class="flex items-start gap-3 p-3 bg-orange-50 border border-orange-200 rounded-lg text-orange-800 shadow-sm">
+                            <i data-lucide="alert-circle" class="w-5 h-5 shrink-0 mt-0.5"></i>
+                            <div>
+                                <h4 class="text-sm font-bold tracking-tight">Budget Warning</h4>
+                                <p class="text-xs mt-1">Project is nearing its budget limit (${burnPct}% burned).</p>
+                            </div>
+                        </div>
+                    `;
+          }
+        }
+
+        // 4. Equilibrium / Profitability
+        if (totalCost > 0 && profit >= 0) {
+          alertsHtml += `
+                    <div class="flex items-start gap-3 p-3 bg-emerald-50 border border-emerald-200 rounded-lg text-emerald-800 shadow-sm">
+                        <i data-lucide="trending-up" class="w-5 h-5 shrink-0 mt-0.5"></i>
+                        <div>
+                            <h4 class="text-sm font-bold tracking-tight">Project Equilibrium</h4>
+                            <p class="text-xs mt-1">The project is currently profitable with a net margin of ${margin}%.</p>
+                        </div>
+                    </div>
+                `;
+        }
+
+        if (!alertsHtml) {
+          alertsHtml = `
+                    <div class="flex items-start gap-3 p-3 bg-slate-50 border border-slate-200 rounded-lg text-slate-500 shadow-sm col-span-full">
+                        <i data-lucide="check-circle" class="w-5 h-5 shrink-0 mt-0.5 text-emerald-500"></i>
+                        <div>
+                            <h4 class="text-sm font-bold tracking-tight">All Good</h4>
+                            <p class="text-xs mt-1">No active warnings or alerts for this project.</p>
+                        </div>
+                    </div>
+                `;
+        }
+
+        // Time series for Line Chart (Cumulative Cost vs Billed over time)
+        const tasksByDate = {};
+        const sortedTasks = [...tasks].sort(
+          (a, b) =>
+            new Date(a.date || a.created_at) - new Date(b.date || b.created_at),
+        );
+
+        sortedTasks.forEach((t) => {
+          const d = new Date(t.date || t.created_at).toLocaleDateString();
+          if (!tasksByDate[d]) tasksByDate[d] = { cost: 0, billed: 0 };
+          tasksByDate[d].cost += parseFloat(t.employee_cost || 0);
+          tasksByDate[d].billed += parseFloat(t.billing_amount || 0);
+        });
+
+        if (state.projectExpenses && state.projectExpenses.length > 0) {
+          state.projectExpenses.forEach((e) => {
+            const d = new Date(e.expense_date).toLocaleDateString();
+            if (!tasksByDate[d]) tasksByDate[d] = { cost: 0, billed: 0 };
+            tasksByDate[d].cost += parseFloat(e.amount || 0);
+          });
+        }
+
+        const allDates = Object.keys(tasksByDate).sort(
+          (a, b) => new Date(a) - new Date(b),
+        );
+        let cumulativeCostArr = [];
+        let cumulativeBilledArr = [];
+        let runCost = 0;
+        let runBilled = 0;
+
+        allDates.forEach((d) => {
+          runCost += tasksByDate[d].cost;
+          runBilled += tasksByDate[d].billed;
+          cumulativeCostArr.push(runCost);
+          cumulativeBilledArr.push(runBilled);
+        });
+
+        setTimeout(() => {
+          // Premium Burn-Down Bar Chart
+          if (chartInstances.projectBurn) chartInstances.projectBurn.destroy();
+          const ctxBurn = document.getElementById("projectBurnChart");
+          if (ctxBurn) {
+            chartInstances.projectBurn = new Chart(ctxBurn, {
+              type: "bar",
+              data: {
+                labels: ["Project Financials"],
+                datasets: [
+                  {
+                    label: "Allocated Budget",
+                    data: [budget],
+                    backgroundColor: "rgba(226, 232, 240, 0.8)",
+                    borderColor: "#cbd5e1",
+                    borderWidth: 1,
+                    borderRadius: 6,
+                    barPercentage: 0.7,
+                  },
+                  {
+                    label: "Employee Cost",
+                    data: [employeeCost],
+                    backgroundColor: "rgba(245, 158, 11, 0.85)",
+                    borderColor: "#d97706",
+                    borderWidth: 1,
+                    borderRadius: 6,
+                    barPercentage: 0.7,
+                  },
+                  {
+                    label: "Extra Expenses",
+                    data: [extraExpenses],
+                    backgroundColor: "rgba(244, 63, 94, 0.85)",
+                    borderColor: "#e11d48",
+                    borderWidth: 1,
+                    borderRadius: 6,
+                    barPercentage: 0.7,
+                  },
+                    {
+                      label: "Client Cost",
+                      data: [clientCost],
+                      backgroundColor: "rgba(16, 185, 129, 0.85)", // emerald-500
+                      borderColor: "#059669",
+                      borderWidth: 1,
+                      borderRadius: 6,
+                      barPercentage: 0.7,
+                    },
+                    {
+                      label: "Task Value (Billed)",
+                      data: [totalBilled],
+                      backgroundColor: "rgba(79, 70, 229, 0.85)",
+                      borderColor: "#4338ca",
+                      borderWidth: 1,
+                      borderRadius: 6,
+                      barPercentage: 0.7,
+                    },
+                  ],
+                },
+                options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                  legend: { display: false },
+                  tooltip: {
+                    backgroundColor: "rgba(15, 23, 42, 0.95)",
+                    titleFont: { family: "Inter", size: 13, weight: "bold" },
+                    bodyFont: { family: "Inter", size: 12 },
+                    padding: 12,
+                    cornerRadius: 8,
+                    displayColors: true,
+                    callbacks: {
+                      label: (context) =>
+                        ` ${context.dataset.label}: ₹${context.raw.toLocaleString()}`,
+                    },
+                  },
+                },
+                scales: {
+                  x: { display: false, grid: { display: false } },
+                  y: {
+                    type: 'logarithmic',
+                    beginAtZero: false, // Log scale doesn't support 0
+                    min: 100, // Smallest value to show (prevents log(0) issues)
+                    grid: {
+                      color: "rgba(226, 232, 240, 0.4)",
+                      borderDash: [4, 4],
+                      drawBorder: false,
+                    },
+                    ticks: {
+                      font: { family: "Inter", size: 10, weight: "600" },
+                      color: "#94a3b8",
+                      callback: function(value) {
+                        if (value === 100 || value === 1000 || value === 10000 || value === 100000 || value === 1000000) {
+                            return "₹" + value.toLocaleString();
+                        }
+                        return null;
+                      }
+                    },
+                  },
+                },
+              },
+            });
+          }
+
+          // Premium Financial Trajectory Line Chart
+          if (chartInstances.projectTrajectory)
+            chartInstances.projectTrajectory.destroy();
+          const ctxLine = document.getElementById("projectTrajectoryChart");
+          if (ctxLine && allDates.length > 0) {
+            const gradBilled = ctxLine
+              .getContext("2d")
+              .createLinearGradient(0, 0, 0, 300);
+            gradBilled.addColorStop(0, "rgba(79, 70, 229, 0.25)");
+            gradBilled.addColorStop(1, "rgba(79, 70, 229, 0.0)");
+
+            const gradCost = ctxLine
+              .getContext("2d")
+              .createLinearGradient(0, 0, 0, 300);
+            gradCost.addColorStop(0, "rgba(244, 63, 94, 0.25)");
+            gradCost.addColorStop(1, "rgba(244, 63, 94, 0.0)");
+
+            chartInstances.projectTrajectory = new Chart(ctxLine, {
+              type: "line",
+              data: {
+                labels: allDates,
+                datasets: [
+                  {
+                    label: "Cumulative Billed",
+                    data: cumulativeBilledArr,
+                    borderColor: "#4f46e5",
+                    backgroundColor: gradBilled,
+                    borderWidth: 3,
+                    fill: true,
+                    tension: 0.4,
+                    pointBackgroundColor: "#ffffff",
+                    pointBorderColor: "#4f46e5",
+                    pointBorderWidth: 2,
+                    pointRadius: 4,
+                    pointHoverRadius: 6,
+                  },
+                  {
+                    label: "Cumulative Cost",
+                    data: cumulativeCostArr,
+                    borderColor: "#f43f5e",
+                    backgroundColor: gradCost,
+                    borderWidth: 3,
+                    fill: true,
+                    tension: 0.4,
+                    pointBackgroundColor: "#ffffff",
+                    pointBorderColor: "#f43f5e",
+                    pointBorderWidth: 2,
+                    pointRadius: 4,
+                    pointHoverRadius: 6,
+                  },
+                ],
+              },
+              options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                  legend: { display: false },
+                  tooltip: {
+                    backgroundColor: "rgba(15, 23, 42, 0.95)",
+                    titleFont: { family: "Inter", size: 13, weight: "bold" },
+                    bodyFont: { family: "Inter", size: 12 },
+                    padding: 14,
+                    cornerRadius: 8,
+                    mode: "index",
+                    intersect: false,
+                    callbacks: {
+                      label: (context) =>
+                        ` ${context.dataset.label}: ₹${context.raw.toLocaleString()}`,
+                    },
+                  },
+                },
+                scales: {
+                  x: {
+                    grid: { display: false, drawBorder: false },
+                    ticks: {
+                      font: { family: "Inter", size: 10, weight: "600" },
+                      color: "#94a3b8",
+                    },
+                  },
+                  y: {
+                    beginAtZero: true,
+                    grid: {
+                      color: "rgba(226, 232, 240, 0.4)",
+                      borderDash: [4, 4],
+                      drawBorder: false,
+                    },
+                    ticks: {
+                      font: { family: "Inter", size: 10, weight: "600" },
+                      color: "#94a3b8",
+                    },
+                  },
+                },
+                interaction: { mode: "index", intersect: false },
+              },
+            });
+          }
+
+          // Milestone Trajectory Chart
+          if (window.renderMilestoneTrajectoryChart)
+            window.renderMilestoneTrajectoryChart();
+        }, 100);
+
+        const topPerformers = Object.values(employeeStats)
+          .sort((a, b) => b.profit - a.profit)
+          .slice(0, 5);
+        let performanceHtml = "";
+        if (topPerformers.length === 0) {
+          performanceHtml =
+            '<div class="text-sm text-slate-400 italic text-center mt-10">No tasks logged yet.</div>';
+        } else {
+          performanceHtml = topPerformers
+            .map(
+              (emp) => `
+                    <div class="flex items-center justify-between p-3 bg-slate-50 rounded-lg border border-slate-100">
+                        <div class="flex items-center gap-3">
+                            <div class="w-8 h-8 rounded-full bg-indigo-50 text-brand-primary flex items-center justify-center text-xs font-bold border border-indigo-100">
+                                ${emp.name.substring(0, 2).toUpperCase()}
+                            </div>
+                            <div>
+                                <p class="text-sm font-bold text-slate-800">${emp.name}</p>
+                                <p class="text-[10px] text-emerald-600 font-medium">Margin: ${formatCurrency(emp.profit)}</p>
+                            </div>
+                        </div>
+                        <div class="text-right">
+                            <p class="text-sm font-bold text-indigo-600">${formatCurrency(emp.billed)}</p>
+                            <p class="text-[10px] text-slate-400">Billed</p>
+                        </div>
+                    </div>
+                `,
+            )
+            .join("");
+        }
+
+        return `
+                <!-- System Alerts -->
+                <div class="mb-6 fade-in">
+                    <h4 class="text-sm font-bold text-slate-800 mb-3 uppercase tracking-wider flex items-center gap-2"><i data-lucide="bell" class="w-4 h-4 text-brand-primary"></i> Project Intelligence & Alerts</h4>
+                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                        ${alertsHtml}
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
+                    <div class="bg-white rounded-xl p-5 border border-slate-200 shadow-sm hover:shadow-md transition-all flex flex-col justify-between min-h-[120px]">
+                        <div>
+                            <p class="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">Client Cost</p>
+                            <h3 class="text-xl font-black text-emerald-600 truncate">${formatCurrency(clientCost)}</h3>
+                        </div>
+                        <p class="text-[10px] text-slate-400 font-medium uppercase tracking-tighter">Actual Project Revenue</p>
+                    </div>
+                    <div class="bg-white rounded-xl p-5 border border-slate-200 shadow-sm hover:shadow-md transition-all flex flex-col justify-between min-h-[120px]">
+                        <div>
+                            <p class="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">Total Budget</p>
+                            <h3 class="text-xl font-black text-slate-800 truncate">${formatCurrency(budget)}</h3>
+                        </div>
+                        <p class="text-[10px] text-slate-400 font-medium uppercase tracking-tighter">Max Allowed Burn</p>
+                    </div>
+                    <div class="bg-white rounded-xl p-5 border border-slate-200 shadow-sm hover:shadow-md transition-all flex flex-col justify-between min-h-[120px]">
+                        <div>
+                            <p class="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">Accumulated Cost</p>
+                            <h3 class="text-xl font-black text-rose-600 truncate" title="Employees: ${formatCurrency(employeeCost)} + Extras: ${formatCurrency(extraExpenses)}">${formatCurrency(totalCost)} <span class="text-[10px] font-bold text-rose-400 ml-1">(${burnPct}%)</span></h3>
+                        </div>
+                        <p class="text-[10px] text-slate-400 font-medium uppercase tracking-tighter">Emp: ${formatCurrency(employeeCost)} | Ext: ${formatCurrency(extraExpenses)}</p>
+                    </div>
+                    <div class="bg-white rounded-xl p-5 border border-slate-200 shadow-sm hover:shadow-md transition-all flex flex-col justify-between min-h-[120px]">
+                        <div>
+                            <p class="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">Task Value (Internal)</p>
+                            <h3 class="text-xl font-black text-indigo-600 truncate">${formatCurrency(totalBilled)}</h3>
+                        </div>
+                        <p class="text-[10px] text-slate-400 font-medium uppercase tracking-tighter">Aggregated internal billing</p>
+                    </div>
+                    <div class="bg-white rounded-xl p-5 border border-slate-200 shadow-sm hover:shadow-md transition-all flex flex-col justify-between min-h-[120px]">
+                        <div>
+                            <p class="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">Net Profit Margin</p>
+                            <h3 class="text-xl font-black ${profit >= 0 ? "text-emerald-600" : "text-brand-alert"} truncate">${formatCurrency(profit)} <span class="text-[10px] font-bold ml-1">(${margin}%)</span></h3>
+                        </div>
+                        <p class="text-[10px] text-slate-400 font-medium uppercase tracking-tighter">Based on Client Cost</p>
+                    </div>
+                </div>
+
+                <!-- New Secondary Metrics -->
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+                    <div class="bg-white rounded-xl p-4 border border-slate-200 shadow-sm flex items-center justify-between">
+                        <div>
+                            <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Assigned Workforce</p>
+                            <h3 class="text-lg font-bold text-slate-800">${employeesAssignedCount} Members</h3>
+                        </div>
+                        <div class="w-10 h-10 rounded-full bg-indigo-50 flex items-center justify-center text-indigo-600 border border-indigo-100">
+                            <i data-lucide="users" class="w-5 h-5"></i>
+                        </div>
+                    </div>
+                    <div class="bg-white rounded-xl p-4 border border-slate-200 shadow-sm flex items-center justify-between">
+                        <div>
+                            <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Time & Ledger</p>
+                            <h3 class="text-lg font-bold text-slate-800">${totalHours.toFixed(1)} Hrs <span class="text-xs font-medium text-slate-500">(${totalTasksLogged} logs)</span></h3>
+                        </div>
+                        <div class="w-10 h-10 rounded-full bg-emerald-50 flex items-center justify-center text-emerald-600 border border-emerald-100">
+                            <i data-lucide="clock" class="w-5 h-5"></i>
+                        </div>
+                    </div>
+                    <div class="bg-white rounded-xl p-4 border border-slate-200 shadow-sm flex items-center justify-between">
+                        <div>
+                            <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Timeline Trajectory</p>
+                            <h3 class="text-lg font-bold text-slate-800">${daysRemainingText}</h3>
+                        </div>
+                        <div class="w-10 h-10 rounded-full bg-amber-50 flex items-center justify-center text-amber-600 border border-amber-100">
+                            <i data-lucide="calendar" class="w-5 h-5"></i>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Milestone Trajectory Analysis (High Impact) -->
+                <div class="bg-white border border-slate-200 rounded-2xl shadow-sm mb-8 p-6 relative overflow-hidden group hover:shadow-md transition-shadow">
+                    <div class="absolute -right-20 -top-20 w-64 h-64 bg-indigo-50 rounded-full blur-3xl opacity-50 group-hover:opacity-80 transition-opacity pointer-events-none"></div>
+                    <div class="flex justify-between items-center mb-8 relative z-10">
+                        <div class="flex items-center gap-3">
+                            <div class="w-10 h-10 rounded-xl bg-brand-primary/10 flex items-center justify-center text-brand-primary">
+                                <i data-lucide="line-chart" class="w-6 h-6"></i>
+                            </div>
+                            <div>
+                                <h4 class="text-sm font-black text-slate-800 uppercase tracking-widest">Milestone Execution Trajectory</h4>
+                                <p class="text-[10px] text-slate-500 font-bold uppercase tracking-widest mt-0.5">Real-time Delivery Velocity & Predictions</p>
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-4 text-xs font-bold text-slate-500 bg-slate-50 px-4 py-2 rounded-xl border border-slate-100">
+                            <span class="flex items-center gap-1.5"><div class="w-2.5 h-2.5 rounded-full border-2 border-slate-300 bg-white shadow-sm"></div> Expected</span>
+                            <span class="flex items-center gap-1.5"><div class="w-2.5 h-2.5 rounded-full bg-emerald-500 shadow-sm shadow-emerald-200"></div> Actual Velocity</span>
+                        </div>
+                    </div>
+                    <div class="w-full h-[320px] relative z-10">
+                        <canvas id="milestoneChart"></canvas>
+                    </div>
+                </div>
+
+                <!-- High-Fidelity Charts and Performance -->
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
+                    <!-- Financial Trajectory -->
+                    <div class="lg:col-span-2 bg-white rounded-2xl border border-slate-200 shadow-sm p-6 relative overflow-hidden group hover:shadow-md transition-shadow">
+                        <div class="absolute -right-20 -bottom-20 w-64 h-64 bg-rose-50 rounded-full blur-3xl opacity-40 group-hover:opacity-70 transition-opacity pointer-events-none"></div>
+                        <div class="flex justify-between items-center mb-6 relative z-10">
+                            <div class="flex items-center gap-3">
+                                <div class="w-10 h-10 rounded-xl bg-indigo-50 flex items-center justify-center text-indigo-600 border border-indigo-100">
+                                    <i data-lucide="trending-up" class="w-5 h-5"></i>
+                                </div>
+                                <div>
+                                    <h4 class="text-sm font-black text-slate-800 uppercase tracking-widest">Financial Trajectory</h4>
+                                    <p class="text-[10px] text-slate-500 font-bold uppercase tracking-widest mt-0.5">Cumulative Cost vs. Billed over Time</p>
+                                </div>
+                            </div>
+                            <div class="flex items-center gap-4 text-xs font-bold text-slate-500 bg-slate-50 px-3 py-1.5 rounded-xl border border-slate-100">
+                                <span class="flex items-center gap-1.5"><div class="w-2.5 h-2.5 rounded-full bg-indigo-500 shadow-sm shadow-indigo-200"></div> Billed</span>
+                                <span class="flex items-center gap-1.5"><div class="w-2.5 h-2.5 rounded-full bg-rose-500 shadow-sm shadow-rose-200"></div> Cost</span>
+                            </div>
+                        </div>
+                        <div class="h-72 relative z-10 w-full">
+                            ${
+                              allDates.length > 0
+                                ? '<canvas id="projectTrajectoryChart"></canvas>'
+                                : '<div class="flex items-center justify-center h-full text-sm text-slate-400 italic bg-slate-50/50 rounded-xl border border-dashed border-slate-200">No financial data available over time yet.</div>'
+                            }
+                        </div>
+                    </div>
+
+                    <!-- Burn Down Overview -->
+                    <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 relative overflow-hidden group hover:shadow-md transition-shadow">
+                        <div class="absolute -right-16 -top-16 w-48 h-48 bg-amber-50 rounded-full blur-3xl opacity-50 group-hover:opacity-80 transition-opacity pointer-events-none"></div>
+                        <div class="flex items-center gap-3 mb-6 relative z-10">
+                            <div class="w-10 h-10 rounded-xl bg-amber-50 flex items-center justify-center text-amber-600 border border-amber-100">
+                                <i data-lucide="bar-chart-2" class="w-5 h-5"></i>
+                            </div>
+                            <div>
+                                <h4 class="text-sm font-black text-slate-800 uppercase tracking-widest">Burn-Down</h4>
+                                <p class="text-[10px] text-slate-500 font-bold uppercase tracking-widest mt-0.5">Budget Allocation</p>
+                            </div>
+                        </div>
+                        <div class="h-64 relative z-10 w-full">
+                            <canvas id="projectBurnChart"></canvas>
+                        </div>
+                        <div class="mt-4 grid grid-cols-2 sm:grid-cols-3 gap-2 relative z-10">
+                            <div class="text-[10px] font-bold text-slate-500 flex items-center gap-1"><div class="w-2 h-2 bg-emerald-500 rounded-sm"></div> Client Cost</div>
+                            <div class="text-[10px] font-bold text-slate-500 flex items-center gap-1"><div class="w-2 h-2 bg-slate-200 rounded-sm"></div> Budget</div>
+                            <div class="text-[10px] font-bold text-slate-500 flex items-center gap-1"><div class="w-2 h-2 bg-amber-500 rounded-sm"></div> Emp Cost</div>
+                            <div class="text-[10px] font-bold text-slate-500 flex items-center gap-1"><div class="w-2 h-2 bg-rose-500 rounded-sm"></div> Extra Exp</div>
+                            <div class="text-[10px] font-bold text-slate-500 flex items-center gap-1"><div class="w-2 h-2 bg-indigo-500 rounded-sm"></div> Task Val</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Performance Matrix -->
+                <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 mb-6">
+                    <div class="flex items-center gap-3 mb-6">
+                        <div class="w-10 h-10 rounded-xl bg-emerald-50 flex items-center justify-center text-emerald-600 border border-emerald-100">
+                            <i data-lucide="zap" class="w-5 h-5"></i>
+                        </div>
+                        <div>
+                            <h4 class="text-sm font-black text-slate-800 uppercase tracking-widest">Performance Matrix</h4>
+                            <p class="text-[10px] text-slate-500 font-bold uppercase tracking-widest mt-0.5">Top contributors generating the highest margin</p>
+                        </div>
+                    </div>
+                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
+                        ${performanceHtml}
+                    </div>
+                </div>
+            `;
+      }
+
+      // Sub-Tab: Team
+      function getProjectTeamTab(p) {
+        const teamHtml = state.projectAssignments
+          .map(
+            (e) => `
+                <div class="bg-white border border-slate-200 rounded-xl p-5 shadow-sm flex flex-col items-center text-center relative group">
+                    <button onclick="unassignEmployee('${e.id}')" class="absolute top-3 right-3 text-slate-300 hover:text-rose-500 transition-colors opacity-0 group-hover:opacity-100" title="Remove from Project">
+                        <i data-lucide="user-minus" class="w-4 h-4"></i>
+                    </button>
+                    <div class="w-14 h-14 bg-indigo-50 text-brand-primary rounded-full flex items-center justify-center font-bold text-xl mb-3 shadow-sm border border-indigo-100">
+                        ${e.full_name ? e.full_name.charAt(0).toUpperCase() : "U"}
+                    </div>
+                    <h4 class="font-bold text-slate-800 text-sm truncate w-full">${e.full_name}</h4>
+                    <p class="text-xs text-slate-500 mb-4">${e.job_title || e.department || "Employee"}</p>
+                    
+                    <div class="w-full bg-slate-50 rounded-lg p-3 text-left border border-slate-100">
+                        <div class="flex justify-between items-center mb-1 text-xs">
+                            <span class="text-slate-500 font-medium">Cost Rate</span>
+                            <span class="font-bold text-slate-800">${e.custom_hourly_cost !== null && e.custom_hourly_cost !== undefined ? formatCurrency(e.custom_hourly_cost) : formatCurrency(e.hourly_cost_rate)} <span class="font-normal text-[10px] text-slate-400">/hr</span></span>
+                        </div>
+                        <div class="flex justify-between items-center text-xs">
+                            <span class="text-slate-500 font-medium">Billing Rate</span>
+                            <span class="font-bold text-brand-primary">${e.custom_hourly_billing !== null && e.custom_hourly_billing !== undefined ? formatCurrency(e.custom_hourly_billing) : formatCurrency(e.hourly_billing_rate)} <span class="font-normal text-[10px] text-brand-primary/50">/hr</span></span>
+                        </div>
+                    </div>
+                    <div class="mt-3 text-[10px] uppercase font-bold tracking-wider ${(e.custom_hourly_cost !== null && e.custom_hourly_cost !== undefined) || (e.custom_hourly_billing !== null && e.custom_hourly_billing !== undefined) ? "text-indigo-600 bg-indigo-50" : "text-slate-500 bg-slate-100"} px-2 py-1 rounded">
+                        ${(e.custom_hourly_cost !== null && e.custom_hourly_cost !== undefined) || (e.custom_hourly_billing !== null && e.custom_hourly_billing !== undefined) ? "Custom Project Rates" : "Default Profile Rates"}
+                    </div>
+                </div>
+            `,
+          )
+          .join("");
+
+        return `
+                <div class="flex justify-between items-center mb-6">
+                    <div>
+                        <h3 class="text-lg font-bold text-slate-800">Resource Control</h3>
+                        <p class="text-sm text-slate-500">Manage who has access to log timesheets and set custom billing rates per employee.</p>
+                    </div>
+                    <button onclick="openAssignmentModal()" class="bg-slate-900 hover:bg-black text-white px-4 py-2 rounded-lg shadow-sm transition-colors text-sm font-medium flex items-center gap-2">
+                        <i data-lucide="user-plus" class="w-4 h-4"></i> Assign Member
+                    </button>
+                </div>
+                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+                    ${teamHtml || '<div class="col-span-full text-center p-8 text-sm text-slate-500 border border-dashed border-slate-200 rounded-xl">No team members assigned to this project yet.</div>'}
+                </div>
+            `;
+      }
+
+      // Sub-Tab: Tasks Ledger
+      function getProjectTasksTab(tasks) {
+        const sortedTasks = [...tasks].sort(
+          (a, b) => new Date(b.created_at) - new Date(a.created_at),
+        );
+        const rows =
+          sortedTasks
+            .map((t) => {
+              const date = new Date(
+                t.date || t.created_at,
+              ).toLocaleDateString();
+              const isDev = t.task_type === "developer";
+              const employee = state.allEmployees.find(
+                (e) => e.id === t.employee_id,
+              );
+              const empName = employee ? employee.full_name : "Unknown";
+              const profit = parseFloat(t.profit_loss || 0);
+              const profitClass =
+                profit >= 0
+                  ? "text-brand-accent bg-emerald-50"
+                  : "text-brand-alert bg-rose-50";
+
+              return `
+                    <tr class="hover:bg-slate-50 border-b border-slate-100 last:border-0 cursor-pointer group" onclick="openTaskDetailsModal('${t.id}')">
+                        <td class="px-4 py-3 whitespace-nowrap">
+                            <div class="font-semibold text-slate-800 text-sm group-hover:text-brand-primary transition-colors">${empName}</div>
+                            <div class="text-[11px] text-slate-500">${date}</div>
+                        </td>
+                        <td class="px-4 py-3">
+                            <div class="flex items-center text-[10px] uppercase font-bold text-slate-500 mb-1"><i data-lucide="${isDev ? "terminal" : "video"}" class="w-3 h-3 mr-1 ${isDev ? "text-indigo-500" : "text-pink-500"}"></i> ${isDev ? "Engineering" : "Content"}</div>
+                            <div class="text-sm text-slate-700 line-clamp-2 w-64" title="${t.task_performed}">${t.task_performed}</div>
+                        </td>
+                        <td class="px-4 py-3 whitespace-nowrap text-sm font-medium text-slate-800 text-center">${parseFloat(t.hours_logged).toFixed(1)}</td>
+                        <td class="px-4 py-3 whitespace-nowrap text-sm text-rose-600 text-right">${formatCurrency(t.employee_cost)}</td>
+                        <td class="px-4 py-3 whitespace-nowrap text-sm font-medium text-indigo-600 text-right">${formatCurrency(t.billing_amount)}</td>
+                        <td class="px-4 py-3 whitespace-nowrap text-sm font-bold text-right"><span class="px-2 py-1 rounded ${profitClass}">${formatCurrency(profit)}</span></td>
+                    </tr>
+                `;
+            })
+            .join("") ||
+          `<tr><td colspan="6" class="px-6 py-8 text-center text-slate-500">No timesheets recorded for this project yet.</td></tr>`;
+
+        return `
+                <div class="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
+                    <table class="min-w-full divide-y divide-slate-200">
+                        <thead class="bg-slate-50">
+                            <tr>
+                                <th class="px-4 py-3 text-left text-xs font-bold text-slate-500 uppercase">Employee & Date</th>
+                                <th class="px-4 py-3 text-left text-xs font-bold text-slate-500 uppercase">Task Description</th>
+                                <th class="px-4 py-3 text-center text-xs font-bold text-slate-500 uppercase">Hours</th>
+                                <th class="px-4 py-3 text-right text-xs font-bold text-slate-500 uppercase">Cost (Burn)</th>
+                                <th class="px-4 py-3 text-right text-xs font-bold text-slate-500 uppercase">Billed (Earn)</th>
+                                <th class="px-4 py-3 text-right text-xs font-bold text-slate-500 uppercase">Net Profit</th>
+                            </tr>
+                        </thead>
+                        <tbody class="bg-white divide-y divide-slate-200">${rows}</tbody>
+                    </table>
+                </div>
+            `;
+      }
+
+      function openTaskDetailsModal(taskId) {
+        const t = state.allTasks.find(
+          (task) => String(task.id) === String(taskId),
+        );
+        if (!t) return;
+
+        const isDev = t.task_type === "developer";
+        const employee = state.allEmployees.find((e) => e.id === t.employee_id);
+        const empName = employee ? employee.full_name : "Unknown Employee";
+        const dateStr = new Date(t.date || t.created_at).toLocaleString();
+
+        let extraDetails = "";
+        if (isDev) {
+          extraDetails = `
+                    <div class="grid grid-cols-2 gap-4 mb-4">
+                        <div class="bg-slate-50 p-3 rounded border border-slate-200">
+                            <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Tech Stack</p>
+                            <p class="text-sm font-medium text-slate-800 mt-1">${t.tech_stack || "N/A"}</p>
+                        </div>
+                        <div class="bg-slate-50 p-3 rounded border border-slate-200">
+                            <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Resource / Link</p>
+                            <p class="text-sm font-medium mt-1 truncate">
+                                ${t.github_link && t.github_link !== "N/A" ? `<a href="${t.github_link}" target="_blank" class="text-brand-primary hover:underline">${t.github_link}</a>` : '<span class="text-slate-500">N/A</span>'}
+                            </p>
+                        </div>
+                    </div>
+                    <div class="bg-indigo-50 p-3 rounded border border-indigo-100 mb-4">
+                        <p class="text-[10px] font-bold text-indigo-800 uppercase tracking-wider mb-1">Tomorrow's Plan</p>
+                        <p class="text-sm text-indigo-900">${t.tomorrow_plan || "N/A"}</p>
+                    </div>
+                `;
+        } else {
+          extraDetails = `
+                    <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+                        <div class="col-span-2 bg-slate-50 p-3 rounded-xl border border-slate-200 flex flex-col justify-between">
+                            <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Target Platforms</p>
+                            <p class="text-sm font-bold text-slate-800 break-words">${t.platform || "N/A"}</p>
+                        </div>
+                        <div class="bg-slate-50 p-3 rounded-xl border border-slate-200 flex flex-col justify-between">
+                            <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Calls</p>
+                            <p class="text-sm font-bold text-slate-800">${t.calls_made || 0}</p>
+                        </div>
+                        <div class="bg-slate-50 p-3 rounded-xl border border-slate-200 flex flex-col justify-between">
+                            <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Reels</p>
+                            <p class="text-sm font-bold text-slate-800">${t.reels_count || 0}</p>
+                        </div>
+                        <div class="bg-slate-50 p-3 rounded-xl border border-slate-200 flex flex-col justify-between">
+                            <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Videos</p>
+                            <p class="text-sm font-bold text-slate-800">${t.long_video_count || 0}</p>
+                        </div>
+                        <div class="bg-slate-50 p-3 rounded-xl border border-slate-200 flex flex-col justify-between">
+                            <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Posters</p>
+                            <p class="text-sm font-bold text-slate-800">${t.poster_count || 0}</p>
+                        </div>
+                    </div>
+                `;
+        }
+
+        const html = `
+                <div class="p-2">
+                    <div class="flex items-center gap-3 mb-6">
+                        <div class="w-12 h-12 rounded-full bg-slate-100 flex items-center justify-center border border-slate-200 text-brand-primary text-xl font-bold">
+                            ${empName.charAt(0).toUpperCase()}
+                        </div>
+                        <div>
+                            <h4 class="font-bold text-slate-800 text-lg leading-tight">${empName}</h4>
+                            <p class="text-xs text-slate-500">${dateStr}</p>
+                        </div>
+                        <div class="ml-auto text-right">
+                            <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold ${isDev ? "bg-indigo-100 text-indigo-700" : "bg-pink-100 text-pink-700"}">
+                                <i data-lucide="${isDev ? "terminal" : "video"}" class="w-3 h-3"></i>
+                                ${isDev ? "Engineering" : "Content"}
+                            </span>
+                            <div class="text-sm font-bold mt-1 text-slate-700">${parseFloat(t.hours_logged).toFixed(1)} hrs logged</div>
+                        </div>
+                    </div>
+                    
+                    <div class="bg-slate-50 border border-slate-200 rounded-lg p-4 mb-4">
+                        <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2">Task Executed</p>
+                        <p class="text-sm text-slate-800 leading-relaxed whitespace-pre-wrap">${t.task_performed}</p>
+                    </div>
+                    
+                    ${extraDetails}
+                    
+                    <div class="mt-6 flex justify-end">
+                        <button onclick="closeModal()" class="px-6 py-2.5 bg-slate-900 text-white rounded-lg font-medium shadow-sm hover:bg-black transition-colors focus:outline-none focus:ring-2 focus:ring-slate-900 focus:ring-offset-2">Close Details</button>
+                    </div>
+                </div>
+            `;
+        openModal("Task Log Inspection", html);
+      }
+
+      function getProjectExpensesTab(p) {
+        let totalExpenses = 0;
+        let expenseHtml = "";
+
+        if (!state.projectExpenses || state.projectExpenses.length === 0) {
+          expenseHtml =
+            '<tr><td colspan="5" class="px-6 py-8 text-center text-slate-500">No expenses recorded yet.</td></tr>';
+        } else {
+          expenseHtml = state.projectExpenses
+            .map((e) => {
+              totalExpenses += parseFloat(e.amount);
+              return `
+                    <tr class="hover:bg-slate-50 border-b border-slate-100 last:border-0 group cursor-pointer" onclick="customAlert('Expense Details', '${e.description}')">
+                        <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-slate-800">${e.expense_name}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-slate-600">${e.expense_date !== "N/A" ? new Date(e.expense_date).toLocaleDateString() : "N/A"}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-rose-600">${formatCurrency(e.amount)}</td>
+                        <td class="px-6 py-4 text-sm text-slate-500 line-clamp-1 max-w-[200px]" title="${e.description}">${e.description}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-right">
+                            <button onclick="event.stopPropagation(); deleteExpense('${e.id}')" class="text-slate-400 hover:text-brand-alert p-1.5 bg-white border border-slate-200 rounded shadow-sm transition-colors opacity-0 group-hover:opacity-100" title="Delete">
+                                <i data-lucide="trash-2" class="w-4 h-4"></i>
+                            </button>
+                        </td>
+                    </tr>
+                    `;
+            })
+            .join("");
+        }
+
+        return `
+                <div class="flex justify-between items-center mb-6">
+                    <div>
+                        <h3 class="text-lg font-bold text-slate-800">Financial Ledger</h3>
+                        <p class="text-sm text-slate-500">Log software, marketing, or miscellaneous project expenses.</p>
+                    </div>
+                    <button onclick="openAddExpenseModal()" class="bg-brand-primary hover:bg-indigo-700 text-white px-4 py-2 rounded-lg shadow-sm transition-colors text-sm font-medium flex items-center gap-2">
+                        <i data-lucide="plus" class="w-4 h-4"></i> Add Expense
+                    </button>
+                </div>
+                
+                <div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden mb-6">
+                    <div class="p-5 border-b border-slate-100 flex items-center justify-between bg-slate-50">
+                        <h4 class="font-bold text-slate-700 text-sm uppercase tracking-wider">Total Extra Expenses</h4>
+                        <span class="text-xl font-black text-rose-600">${formatCurrency(totalExpenses)}</span>
+                    </div>
+                    <div class="overflow-x-auto">
+                        <table class="min-w-full divide-y divide-slate-200">
+                            <thead class="bg-white border-b border-slate-200">
+                                <tr>
+                                    <th class="px-6 py-3 text-left text-xs font-bold text-slate-500 uppercase">Expense Name</th>
+                                    <th class="px-6 py-3 text-left text-xs font-bold text-slate-500 uppercase">Date</th>
+                                    <th class="px-6 py-3 text-left text-xs font-bold text-slate-500 uppercase">Amount</th>
+                                    <th class="px-6 py-3 text-left text-xs font-bold text-slate-500 uppercase">Notes</th>
+                                    <th class="px-6 py-3 text-right text-xs font-bold text-slate-500 uppercase">Action</th>
+                                </tr>
+                            </thead>
+                            <tbody class="bg-white divide-y divide-slate-100">
+                                ${expenseHtml}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            `;
+      }
+
+      function getProjectPaymentsTab(p) {
+        let paymentHtml = "";
+        const payments = state.activeProjectPayments || [];
+            
+        if (payments.length === 0) {
+            paymentHtml = '<tr><td colspan="5" class="px-6 py-8 text-center text-slate-500">No payments recorded yet.</td></tr>';
+        } else {
+            paymentHtml = payments.map(pm => `
+                <tr class="hover:bg-slate-50 border-b border-slate-100 last:border-0 group">
+                    <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-slate-800">${new Date(pm.payment_date).toLocaleDateString()}</td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm font-bold text-emerald-600">${formatCurrency(pm.amount)}</td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm text-slate-600">${pm.payment_method}</td>
+                    <td class="px-6 py-4">
+                        <div class="flex flex-col">
+                            <span class="text-xs font-bold text-slate-700 uppercase tracking-tighter">${pm.reference_number}</span>
+                            <span class="text-[10px] text-slate-400 italic truncate max-w-[150px]" title="${pm.remarks}">${pm.remarks}</span>
+                        </div>
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap text-right">
+                        <div class="flex justify-end gap-2">
+                             <button onclick="downloadPaymentInvoice('${pm.id}')" class="text-slate-400 hover:text-brand-primary p-1.5 bg-white border border-slate-200 rounded shadow-sm transition-colors opacity-0 group-hover:opacity-100" title="Download Invoice">
+                                <i data-lucide="file-text" class="w-4 h-4"></i>
+                            </button>
+                            <button onclick="deletePayment('${pm.id}')" class="text-slate-400 hover:text-brand-alert p-1.5 bg-white border border-slate-200 rounded shadow-sm transition-colors opacity-0 group-hover:opacity-100" title="Delete">
+                                <i data-lucide="trash-2" class="w-4 h-4"></i>
+                            </button>
+                        </div>
+                    </td>
+                </tr>
+            `).join("");
+        }
+
+        return `
+            <div class="flex justify-between items-center mb-6">
+                <div>
+                    <h3 class="text-lg font-bold text-slate-800">Client Payments Ledger</h3>
+                    <p class="text-sm text-slate-500">Track and manage installments received from the client.</p>
+                </div>
+                <button onclick="openAddPaymentModal()" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg shadow-sm transition-colors text-sm font-medium flex items-center gap-2">
+                    <i data-lucide="plus" class="w-4 h-4"></i> Record Payment
+                </button>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+                <div class="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+                    <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Contract Value</p>
+                    <p class="text-xl font-black text-slate-800">${formatCurrency(p.client_cost || 0)}</p>
+                </div>
+                <div class="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+                    <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Total Paid</p>
+                    <p class="text-xl font-black text-emerald-600">${formatCurrency(p.total_paid || 0)}</p>
+                </div>
+                <div class="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+                    <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Outstanding</p>
+                    <p class="text-xl font-black text-rose-600">${formatCurrency(p.pending_amount || 0)}</p>
+                </div>
+            </div>
+
+            <div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+                <table class="min-w-full divide-y divide-slate-200">
+                    <thead class="bg-slate-50">
+                        <tr>
+                            <th class="px-6 py-3 text-left text-xs font-bold text-slate-500 uppercase">Date</th>
+                            <th class="px-6 py-3 text-left text-xs font-bold text-slate-500 uppercase">Amount</th>
+                            <th class="px-6 py-3 text-left text-xs font-bold text-slate-500 uppercase">Method</th>
+                            <th class="px-6 py-3 text-left text-xs font-bold text-slate-500 uppercase">Ref #</th>
+                            <th class="px-6 py-3 text-right text-xs font-bold text-slate-500 uppercase">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody class="bg-white divide-y divide-slate-100">
+                        ${paymentHtml}
+                    </tbody>
+                </table>
+            </div>
+        `;
+      }
+
+      function openAddPaymentModal() {
+        const p = state.activeProject;
+        if (!p) return;
+
+        const html = `
+            <form onsubmit="handlePaymentSave(event)" class="space-y-4">
+                <div class="bg-emerald-50 p-3 rounded-lg border border-emerald-100 mb-4">
+                    <p class="text-xs text-emerald-800 font-medium italic">Recording payment for project: <span class="font-bold">${p.name}</span></p>
+                </div>
+                <div>
+                    <label class="block text-sm font-semibold text-slate-700 mb-1">Amount (₹) *</label>
+                    <input type="number" id="pay_amount" required step="0.01" min="1" class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm" placeholder="0.00">
+                </div>
+                <div class="grid grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-sm font-semibold text-slate-700 mb-1">Date *</label>
+                        <input type="date" id="pay_date" required class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-semibold text-slate-700 mb-1">Method</label>
+                        <select id="pay_method" class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm">
+                            <option value="Bank Transfer">Bank Transfer</option>
+                            <option value="UPI">UPI</option>
+                            <option value="Cash">Cash</option>
+                            <option value="Cheque">Cheque</option>
+                        </select>
+                    </div>
+                </div>
+                <div>
+                    <label class="block text-sm font-semibold text-slate-700 mb-1">Reference Number / Transaction ID</label>
+                    <input type="text" id="pay_ref" class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm" placeholder="e.g. TXN123456789">
+                </div>
+                <div>
+                    <label class="block text-sm font-semibold text-slate-700 mb-1">Remarks</label>
+                    <textarea id="pay_remarks" rows="2" class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm resize-none" placeholder="Notes about this installment..."></textarea>
+                </div>
+                <div id="paymentErrorBanner" class="hidden bg-rose-50 border border-rose-200 text-brand-alert px-4 py-3 rounded-lg text-sm flex items-start shadow-sm">
+                    <i data-lucide="alert-circle" class="w-4 h-4 mr-2 mt-0.5 flex-shrink-0"></i>
+                    <span id="paymentErrorMessage">Error message</span>
+                </div>
+                <div class="mt-6 flex justify-end gap-3 pt-4 border-t border-slate-100">
+                    <button type="button" onclick="closeModal()" class="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg font-medium transition-colors">Cancel</button>
+                    <button type="submit" id="btnSubmitPayment" class="px-5 py-2 bg-emerald-600 text-white rounded-lg font-medium shadow-sm hover:bg-emerald-700 transition-all flex items-center gap-2">
+                        <i data-lucide="check" class="w-4 h-4"></i> Save Payment
+                    </button>
+                </div>
+            </form>
+        `;
+        openModal("Record Client Installment", html);
+        document.getElementById('pay_date').valueAsDate = new Date();
+      }
+
+      async function handlePaymentSave(event) {
+        event.preventDefault();
+        const btn = document.getElementById("btnSubmitPayment");
+        const originalText = btn.innerHTML;
+        btn.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 mr-2 animate-spin"></i> Processing...';
+        btn.disabled = true;
+
+        try {
+            const payload = {
+                project_id: state.activeProject.id,
+                amount: parseFloat(document.getElementById("pay_amount").value),
+                payment_date: new Date(document.getElementById("pay_date").value).toISOString(),
+                payment_method: document.getElementById("pay_method").value,
+                reference_number: document.getElementById("pay_ref").value || "N/A",
+                remarks: document.getElementById("pay_remarks").value || "N/A"
+            };
+
+            await apiFetch("/projects/payments/create", {
+                method: "POST",
+                body: payload
+            });
+
+            showToast("Payment recorded successfully", "success");
+            closeModal();
+            await loadAdminWorkspaceData(); // Refresh global project data (for updated pending_amount)
+            await openProjectDetails(state.activeProject.id); // Refresh active project
+            state.activeProjectTab = "payments"; // Maintain tab
+            renderAdminApp();
+        } catch (err) {
+            const errBanner = document.getElementById("paymentErrorBanner");
+            const errSpan = document.getElementById("paymentErrorMessage");
+            if(errSpan) errSpan.innerText = err.message;
+            if(errBanner) errBanner.classList.remove("hidden");
+            btn.innerHTML = originalText;
+            btn.disabled = false;
+        }
+      }
+
+      async function deletePayment(paymentId) {
+        const isConfirmed = await customConfirm(
+            "Delete Payment Record",
+            "Are you sure you want to delete this payment record? This will revert the project's financial status.",
+            "Delete Record",
+            "Keep It",
+            true
+        );
+        if (!isConfirmed) return;
+
+        try {
+            await apiFetch(`/projects/payments/delete/${paymentId}`, {
+                method: "DELETE"
+            });
+            showToast("Payment record removed", "success");
+            await loadAdminWorkspaceData();
+            await openProjectDetails(state.activeProject.id);
+            state.activeProjectTab = "payments";
+            renderAdminApp();
+        } catch (err) {
+            showToast("Failed to delete payment: " + err.message, "error");
+        }
+      }
+
+      function downloadPaymentInvoice(paymentId) {
+        const pm = state.activeProjectPayments.find(p => p.id === paymentId);
+        const proj = state.activeProject;
+        if (!pm || !proj) return;
+
+        const clientInfo = state.allClients.find(c => c.name === proj.client) || {
+            company: proj.client,
+            email: 'N/A',
+            phone: 'N/A',
+            address: 'N/A'
+        };
+
+        const invoiceNo = `REC-${pm.id.substring(0, 8).toUpperCase()}`;
+        const dateStr = new Date(pm.payment_date).toLocaleDateString();
+        
+        const invoiceHtml = `
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Payment Receipt - ${invoiceNo}</title>
+                <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
+                <style>
+                    * { margin: 0; padding: 0; box-sizing: border-box; }
+                    body { font-family: 'Inter', sans-serif; color: #1e293b; background: #f8fafc; line-height: 1.5; padding: 40px; }
+                    .receipt-card { max-width: 800px; margin: auto; background: white; padding: 50px; border-radius: 24px; box-shadow: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1); border: 1px solid #e2e8f0; position: relative; overflow: hidden; }
+                    .receipt-card::before { content: ''; position: absolute; top: 0; left: 0; width: 100%; height: 6px; background: linear-gradient(to right, #4f46e5, #06b6d4); }
+                    
+                    .header { display: flex; justify-content: space-between; align-items: start; margin-bottom: 50px; }
+                    .brand h1 { font-size: 24px; font-weight: 800; color: #4f46e5; letter-spacing: -0.025em; margin-bottom: 4px; }
+                    .brand p { font-size: 12px; color: #64748b; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
+                    
+                    .title-section { text-align: right; }
+                    .title-section h2 { font-size: 32px; font-weight: 800; color: #1e293b; margin-bottom: 8px; }
+                    .receipt-meta { display: flex; flex-direction: column; gap: 4px; align-items: flex-end; }
+                    .meta-item { display: flex; gap: 12px; font-size: 14px; }
+                    .meta-label { color: #64748b; font-weight: 500; }
+                    .meta-value { color: #1e293b; font-weight: 700; }
+
+                    .address-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 60px; margin-bottom: 50px; padding: 30px; background: #f8fafc; border-radius: 16px; border: 1px solid #f1f5f9; }
+                    .address-box h4 { font-size: 11px; font-weight: 800; color: #64748b; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 12px; }
+                    .address-box p { font-size: 14px; color: #334155; white-space: pre-line; }
+                    .address-box strong { color: #1e293b; font-size: 16px; }
+
+                    table { width: 100%; border-collapse: collapse; margin-bottom: 40px; }
+                    th { text-align: left; padding: 16px; font-size: 12px; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 2px solid #e2e8f0; }
+                    td { padding: 20px 16px; border-bottom: 1px solid #f1f5f9; font-size: 15px; vertical-align: top; }
+                    
+                    .item-desc strong { display: block; font-size: 16px; color: #1e293b; margin-bottom: 4px; }
+                    .item-desc span { font-size: 13px; color: #64748b; font-weight: 500; }
+                    
+                    .amount-column { text-align: right; font-weight: 700; color: #1e293b; font-size: 16px; }
+                    
+                    .summary-section { margin-top: 20px; border-top: 2px solid #e2e8f0; padding-top: 20px; }
+                    .summary-row { display: flex; justify-content: flex-end; gap: 40px; padding: 8px 16px; }
+                    .summary-row.total { margin-top: 8px; padding: 20px 16px; background: #f0fdf4; border-radius: 12px; }
+                    .total .summary-label { color: #166534; font-size: 16px; font-weight: 700; }
+                    .total .summary-value { color: #15803d; font-size: 24px; font-weight: 800; }
+
+                    .remarks-section { margin-top: 40px; padding: 24px; border-radius: 16px; background: #fff; border: 2px dashed #e2e8f0; }
+                    .remarks-section h4 { font-size: 12px; font-weight: 800; color: #64748b; text-transform: uppercase; margin-bottom: 8px; }
+                    .remarks-section p { font-size: 14px; color: #475569; font-style: italic; }
+
+                    .footer { margin-top: 60px; text-align: center; border-top: 1px solid #e2e8f0; padding-top: 30px; }
+                    .footer p { font-size: 13px; color: #94a3b8; font-weight: 500; }
+                    .footer .signature { margin-top: 30px; display: flex; justify-content: center; }
+                    .sig-line { border-top: 1px solid #cbd5e1; width: 200px; padding-top: 8px; font-size: 11px; font-weight: 700; color: #64748b; text-transform: uppercase; }
+
+                    @media print {
+                        body { background: white; padding: 0; }
+                        .receipt-card { box-shadow: none; border: none; padding: 30px; }
+                        button { display: none; }
+                    }
+                </style>
+            </head>
+            <body>
+                <div class="receipt-card">
+                    <div class="header">
+                        <div class="brand">
+                            <h1>YANA TECHNOLOGIES</h1>
+                            <p>Global Engineering Excellence</p>
+                        </div>
+                        <div class="title-section">
+                            <h2>RECEIPT</h2>
+                            <div class="receipt-meta">
+                                <div class="meta-item">
+                                    <span class="meta-label">Receipt No:</span>
+                                    <span class="meta-value">${invoiceNo}</span>
+                                </div>
+                                <div class="meta-item">
+                                    <span class="meta-label">Date:</span>
+                                    <span class="meta-value">${dateStr}</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="address-grid">
+                        <div class="address-box">
+                            <h4>Issued By</h4>
+                            <p><strong>Yana Technologies Pvt. Ltd.</strong><br>14th Floor, Innovation Hub<br>Bandra Kurla Complex, Mumbai<br>Maharashtra, India - 400051<br>finance@yana.tech</p>
+                        </div>
+                        <div class="address-box">
+                            <h4>Client Details</h4>
+                            <p><strong>${clientInfo.company}</strong><br>${clientInfo.address}<br>Email: ${clientInfo.email}<br>Phone: ${clientInfo.phone}</p>
+                        </div>
+                    </div>
+
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Transaction Description</th>
+                                <th style="text-align: center;">Project</th>
+                                <th style="text-align: center;">Method</th>
+                                <th style="text-align: right;">Amount</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td class="item-desc">
+                                    <strong>Project Installment</strong>
+                                    <span>Transaction ID: ${pm.reference_number}</span>
+                                </td>
+                                <td style="text-align: center; font-weight: 600;">${proj.name}</td>
+                                <td style="text-align: center; color: #64748b; font-weight: 500;">${pm.payment_method}</td>
+                                <td class="amount-column">${formatCurrency(pm.amount)}</td>
+                            </tr>
+                        </tbody>
+                    </table>
+
+                    <div class="summary-section">
+                        <div class="summary-row total">
+                            <span class="summary-label">Total Amount Received</span>
+                            <span class="summary-value">${formatCurrency(pm.amount)}</span>
+                        </div>
+                    </div>
+
+                    ${pm.remarks && pm.remarks !== 'N/A' ? `
+                    <div class="remarks-section">
+                        <h4>Transaction Notes</h4>
+                        <p>"${pm.remarks}"</p>
+                    </div>
+                    ` : ''}
+
+                    <div class="footer">
+                        <p>Thank you for your business. We look forward to our continued collaboration.</p>
+                        <div class="signature">
+                            <div class="sig-line">Authorized Signatory</div>
+                        </div>
+                        <p style="margin-top: 20px; font-size: 10px; color: #cbd5e1;">This is a system-generated document for the Yana Technologies Project Management Portal.</p>
+                    </div>
+                </div>
+                <script>
+                    window.onload = function() { 
+                        setTimeout(() => {
+                            window.print();
+                        }, 500);
+                    };
+                <\/script>
+            </body>
+            </html>
+        `;
+
+        const printWindow = window.open('', '_blank');
+        printWindow.document.write(invoiceHtml);
+        printWindow.document.close();
+      }
+
+
+      function openAddExpenseModal() {
+        const p = state.activeProject;
+        if (!p) return;
+
+        const html = `
+                <form onsubmit="handleExpenseSave(event)" class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-semibold text-slate-700 mb-1">Expense Name / Title *</label>
+                        <input type="text" id="expense_name" required placeholder="e.g., AWS Hosting, Ads..." class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm">
+                    </div>
+                    <div class="grid grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-sm font-semibold text-slate-700 mb-1">Amount (₹) *</label>
+                            <input type="number" id="expense_amount" required step="0.01" min="0.01" class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm" placeholder="0.00">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-semibold text-slate-700 mb-1">Date</label>
+                            <input type="date" id="expense_date" class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm">
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-semibold text-slate-700 mb-1">Description / Notes</label>
+                        <textarea id="expense_desc" rows="3" class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm resize-y" placeholder="Additional details..."></textarea>
+                    </div>
+                    <div id="expenseErrorBanner" class="hidden bg-rose-50 border border-rose-200 text-brand-alert px-4 py-3 rounded-lg text-sm items-start shadow-sm mt-4">
+                        <i data-lucide="alert-circle" class="w-4 h-4 mr-2 mt-0.5 flex-shrink-0"></i>
+                        <span id="expenseErrorMessage">Error message</span>
+                    </div>
+                    <div class="mt-6 flex justify-end gap-3 pt-4 border-t border-slate-100">
+                        <button type="button" onclick="closeModal()" class="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg font-medium transition-colors">Cancel</button>
+                        <button type="submit" id="btnSubmitExpense" class="px-5 py-2 bg-brand-primary text-white rounded-lg font-medium shadow-sm hover:bg-indigo-700 transition-all flex items-center gap-2">
+                            <i data-lucide="check" class="w-4 h-4"></i> Add Expense
+                        </button>
+                    </div>
+                </form>
+            `;
+        openModal("Log Project Expense", html);
+      }
+
+      async function handleExpenseSave(event) {
+        event.preventDefault();
+        const btn = document.getElementById("btnSubmitExpense");
+        const originalText = btn.innerHTML;
+        btn.innerHTML =
+          '<i data-lucide="loader-2" class="w-4 h-4 mr-2 animate-spin"></i> Saving...';
+        btn.disabled = true;
+        document.getElementById("expenseErrorBanner").classList.add("hidden");
+
+        try {
+          const payload = {
+            project_id: state.activeProject.id,
+            expense_name: document.getElementById("expense_name").value,
+            amount: parseFloat(document.getElementById("expense_amount").value),
+          };
+
+          const ed = document.getElementById("expense_date").value;
+          const desc = document.getElementById("expense_desc").value;
+          if (ed) payload.expense_date = new Date(ed).toISOString();
+          if (desc) payload.description = desc;
+
+          await apiFetch("/projects/expenses/create", {
+            method: "POST",
+            body: payload,
+          });
+          showToast("Expense logged successfully", "success");
+          closeModal();
+          await openProjectDetails(state.activeProject.id);
+        } catch (err) {
+          document.getElementById("expenseErrorMessage").innerText =
+            err.message;
+          document
+            .getElementById("expenseErrorBanner")
+            .classList.remove("hidden");
+          document.getElementById("expenseErrorBanner").classList.add("flex");
+        } finally {
+          btn.innerHTML = originalText;
+          btn.disabled = false;
+          lucide.createIcons();
+        }
+      }
+
+      async function deleteExpense(expenseId) {
+        const isConfirmed = await customConfirm(
+          "Delete Expense",
+          "Are you sure you want to delete this expense record?",
+          "Delete",
+          "Cancel",
+          true,
+        );
+        if (!isConfirmed) return;
+        try {
+          await apiFetch(`/projects/expenses/delete/${expenseId}`, {
+            method: "DELETE",
+          });
+          showToast("Expense deleted successfully", "success");
+          await openProjectDetails(state.activeProject.id);
+        } catch (err) {
+          showToast("Failed to delete expense: " + err.message, "error");
+        }
+      }
+
+      // Premium Time-Based Trajectory Engine
+      window.renderMilestoneTrajectoryChart = function () {
+        const ctx = document.getElementById("milestoneChart");
+        if (!ctx) return;
+
+        if (chartInstances.milestoneChart) {
+          chartInstances.milestoneChart.destroy();
+        }
+
+        const p = state.activeProject;
+        if (!p || !state.projectTimeline || state.projectTimeline.length === 0)
+          return;
+
+        // Sort milestones by delivery date (expected_end)
+        const sortedTimelines = [...state.projectTimeline].sort(
+          (a, b) => new Date(a.expected_end || a.expected_start) - new Date(b.expected_end || b.expected_start),
+        );
+
+        // Compute project temporal bounds with high-fidelity fallbacks
+        let projStart = p.start_date
+          ? new Date(p.start_date)
+          : new Date(p.created_at || sortedTimelines[0].expected_start);
+        let projEnd = p.end_date ? new Date(p.end_date) : new Date();
+
+        // High-Precision Boundary Check: Ensure chart covers all milestones and project dates
+        sortedTimelines.forEach(t => {
+          const mS = new Date(t.expected_start);
+          const mE = new Date(t.expected_end || t.expected_start);
+          if (mS < projStart) projStart = mS;
+          if (mE > projEnd) projEnd = mE;
+        });
+
+        // Ensure end date is not before start date for chart scales
+        if (projEnd < projStart)
+          projEnd = new Date(projStart.getTime() + 30 * 24 * 60 * 60 * 1000);
+
+        const increment = 100 / sortedTimelines.length;
+        let cumulativeProgress = 0;
+
+        const datasetData = [];
+        // Project Kickoff Point (0% progress)
+        datasetData.push({ x: projStart.getTime(), y: 0, milestone: null });
+
+        sortedTimelines.forEach((t) => {
+          cumulativeProgress += increment;
+          // Plot the milestone completion point at its expected end date
+          const mDate = new Date(t.expected_end || t.expected_start).getTime();
+
+          let yVal = 0;
+          if (t.status === "Completed") {
+            yVal = cumulativeProgress;
+          } else if (t.status === "In Progress" || t.status === "Active") {
+            const milestoneTasks = state.allTasks.filter(
+              (task) => task.milestone_id === t.id,
+            );
+            const total = milestoneTasks.length;
+            
+            // Timesheets are inherently "completed" logs and don't have a status.
+            // Since there is no "total expected tasks" metric, we use an asymptotic curve
+            // to show progression (up to ~90% of the increment) based on the volume of tasks logged.
+            const partial = total > 0 ? increment * (1 - Math.pow(0.8, total)) : 0;
+            
+            yVal = cumulativeProgress - increment + partial;
+          } else {
+            yVal = Math.max(0, cumulativeProgress - increment);
+          }
+
+          datasetData.push({ x: mDate, y: yVal, milestone: t });
+        });
+
+        const primaryColor = "#4338ca"; // Indigo-700
+        const successColor = "#10b981"; // Emerald-500
+        const deadlineColor = "#f43f5e"; // Rose-500
+
+        const gradient = ctx
+          .getContext("2d")
+          .createLinearGradient(0, 0, 0, 350);
+        gradient.addColorStop(0, "rgba(67, 56, 202, 0.12)");
+        gradient.addColorStop(1, "rgba(16, 185, 129, 0.01)");
+
+        chartInstances.milestoneChart = new Chart(ctx, {
+          type: "line",
+          data: {
+            datasets: [
+              {
+                label: "Project Velocity",
+                data: datasetData,
+                borderColor: primaryColor,
+                borderWidth: 4,
+                backgroundColor: gradient,
+                fill: true,
+                tension: 0.4,
+                pointRadius: (ctx) => (ctx.raw && ctx.raw.milestone ? 7 : 4),
+                pointBackgroundColor: (ctx) => {
+                  const m = ctx.raw ? ctx.raw.milestone : null;
+                  if (!m) return "#ffffff";
+                  return m.status === "Completed" ? successColor : "#ffffff";
+                },
+                pointBorderColor: (ctx) => {
+                  const m = ctx.raw ? ctx.raw.milestone : null;
+                  if (!m) return primaryColor;
+                  return m.status === "Completed" ? "#ffffff" : primaryColor;
+                },
+                pointBorderWidth: 3,
+                pointHoverRadius: 10,
+                pointHoverBackgroundColor: (ctx) =>
+                  ctx.raw &&
+                  ctx.raw.milestone &&
+                  ctx.raw.milestone.status === "Completed"
+                    ? successColor
+                    : primaryColor,
+                pointHoverBorderColor: "#ffffff",
+                pointHoverBorderWidth: 4,
+              },
+            ],
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: {
+              x: {
+                type: "time",
+                time: {
+                  unit: "day",
+                  displayFormats: { day: "MMM d" },
+                },
+                min: projStart.getTime() - (12 * 60 * 60 * 1000),
+                max: projEnd.getTime() + (24 * 60 * 60 * 1000),
+                grid: { display: false },
+                ticks: {
+                  font: { family: "Inter", size: 10, weight: "700" },
+                  color: "#94a3b8",
+                },
+              },
+              y: {
+                beginAtZero: true,
+                max: 105,
+                ticks: {
+                  callback: (v) => v + "%",
+                  font: { family: "Inter", size: 10, weight: "800" },
+                  color: "#cbd5e1",
+                },
+                grid: {
+                  color: "rgba(226, 232, 240, 0.4)",
+                  drawBorder: false,
+                  borderDash: [4, 4],
+                },
+              },
+            },
+            plugins: {
+              legend: { display: false },
+              tooltip: {
+                backgroundColor: "rgba(15, 23, 42, 0.98)",
+                titleFont: { family: "Inter", size: 13, weight: "bold" },
+                bodyFont: { family: "Inter", size: 12 },
+                padding: 16,
+                cornerRadius: 12,
+                displayColors: true,
+                callbacks: {
+                  label: (context) => {
+                    const dp = context.raw;
+                    if (!dp.milestone) return "Project Initialization";
+                    return [
+                      `Phase: ${dp.milestone.milestone_name}`,
+                      `Completion: ${context.parsed.y.toFixed(1)}%`,
+                      `Status: ${dp.milestone.status}`,
+                    ];
+                  },
+                },
+              },
+              annotation: {
+                annotations: {
+                  deadlineLine: {
+                    type: "line",
+                    xMin: projEnd.getTime(),
+                    xMax: projEnd.getTime(),
+                    borderColor: deadlineColor,
+                    borderWidth: 3,
+                    borderDash: [5, 5],
+                    label: {
+                      display: true,
+                      content: "PROJECT DEADLINE",
+                      position: "start",
+                      backgroundColor: deadlineColor,
+                      color: "#fff",
+                      font: { size: 10, weight: "900", family: "Inter" },
+                      padding: 6,
+                      borderRadius: 4,
+                    },
+                  },
+                  todayLine: {
+                    type: "line",
+                    xMin: new Date().getTime(),
+                    xMax: new Date().getTime(),
+                    borderColor: "#64748b",
+                    borderWidth: 2,
+                    label: {
+                      display: true,
+                      content: "TODAY",
+                      position: "end",
+                      backgroundColor: "rgba(100, 116, 139, 0.9)",
+                      color: "#fff",
+                      font: { size: 9, weight: "bold", family: "Inter" },
+                      padding: 4,
+                      borderRadius: 4,
+                    },
+                  },
+                },
+              },
+            },
+            interaction: { intersect: false, mode: "index" },
+          },
+        });
+      };
+
+      // Sub-Tab: Timeline
+      function getProjectTimelineTab(p, pTasks) {
+        let timelineHtml = "";
+
+        if (!state.projectTimeline || state.projectTimeline.length === 0) {
+          timelineHtml =
+            '<div class="text-sm text-slate-500 p-8 text-center border border-dashed border-slate-200 rounded-xl max-w-2xl bg-slate-50">No milestones recorded yet. Add the first milestone to track project progress.</div>';
+        } else {
+          timelineHtml = state.projectTimeline
+            .map((t, idx) => {
+              let statusColor = "bg-slate-500";
+              let ringColor = "ring-slate-50";
+              let borderColor = "border-slate-200";
+
+              if (t.status === "Completed") {
+                statusColor = "bg-emerald-500";
+                borderColor = "border-emerald-200";
+                ringColor = "ring-emerald-50";
+              }
+              if (t.status === "Active" || t.status === "In Progress") {
+                statusColor = "bg-indigo-500";
+                borderColor = "border-indigo-200";
+                ringColor = "ring-indigo-50";
+              }
+              if (t.status === "Delayed") {
+                statusColor = "bg-amber-500";
+                borderColor = "border-amber-200";
+                ringColor = "ring-amber-50";
+              }
+
+              const expectedStartStr = t.expected_start
+                ? new Date(t.expected_start).toLocaleDateString()
+                : "N/A";
+              const actualStr = t.actual_start
+                ? `Actual: ${new Date(t.actual_start).toLocaleDateString()}`
+                : t.actual_end
+                  ? `Actual: ${new Date(t.actual_end).toLocaleDateString()}`
+                  : "";
+
+              // Empirical Aggregation
+              const milestoneTasks = pTasks.filter(
+                (task) => task.milestone_id === t.id,
+              );
+              let loggedHours = 0;
+              milestoneTasks.forEach((task) => {
+                if (task.hours_logged)
+                  loggedHours += parseFloat(task.hours_logged);
+              });
+
+              return `
+                    <div class="relative cursor-pointer group w-fit" onclick="openMilestoneDetails('${t.id}')">
+                        <div class="absolute -left-[41px] w-5 h-5 ${statusColor} border-4 border-white rounded-full shadow-sm ring-2 ${ringColor} group-hover:scale-110 transition-transform"></div>
+                        <div class="bg-white border ${borderColor} rounded-xl p-5 shadow-sm max-w-2xl hover:shadow-md transition-shadow relative">
+                            <div class="flex justify-between items-start mb-2">
+                                <div class="flex-1 pr-4">
+                                    <h4 class="font-bold text-slate-900 group-hover:text-brand-primary transition-colors mb-1">${t.milestone_name}</h4>
+                                    <span class="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${t.status === "Completed" ? "bg-emerald-50 text-emerald-700" : t.status === "Active" ? "bg-indigo-50 text-indigo-700" : "bg-slate-100 text-slate-700"} rounded-md">${t.status}</span>
+                                </div>
+                                <div class="flex items-center gap-1">
+                                    ${t.status !== "Completed" ? `<button onclick="event.stopPropagation(); markMilestoneComplete('${t.id}')" class="p-2 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition-all" title="Mark Complete"><i data-lucide="check-circle" class="w-5 h-5"></i></button>` : ""}
+                                    <button onclick="event.stopPropagation(); deleteMilestone('${t.id}')" class="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-all" title="Delete Milestone"><i data-lucide="trash-2" class="w-5 h-5"></i></button>
+                                </div>
+                            </div>
+                            <div class="flex items-center gap-4 text-xs font-medium text-slate-500 mb-3 border-b border-slate-100 pb-3">
+                                <span><i data-lucide="calendar" class="w-3.5 h-3.5 inline mr-1"></i> Expected: ${expectedStartStr}</span>
+                                ${actualStr ? `<span class="text-slate-600"><i data-lucide="check-circle" class="w-3.5 h-3.5 inline mr-1"></i> ${actualStr}</span>` : ""}
+                            </div>
+                            <div class="flex items-center justify-between">
+                                <div class="text-xs font-bold text-slate-400 uppercase tracking-wider">Milestone Execution</div>
+                                <div class="flex gap-3">
+                                    <span class="inline-flex items-center px-2 py-1 bg-slate-50 border border-slate-200 rounded text-slate-600 text-xs font-bold shadow-sm">
+                                        <i data-lucide="list-todo" class="w-3.5 h-3.5 mr-1.5 text-slate-400"></i> ${milestoneTasks.length} Tasks
+                                    </span>
+                                    <span class="inline-flex items-center px-2 py-1 bg-indigo-50 border border-indigo-100 rounded text-brand-primary text-xs font-bold shadow-sm">
+                                        <i data-lucide="clock" class="w-3.5 h-3.5 mr-1.5 text-indigo-400"></i> ${loggedHours.toFixed(1)} Hrs Logged
+                                    </span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    `;
+            })
+            .join("");
+        }
+
+        return `
+                 <div class="flex justify-between items-center mb-8">
+                    <div>
+                        <h3 class="text-lg font-bold text-slate-800">Milestone Ledger</h3>
+                        <p class="text-sm text-slate-500">Track execution phases and delivery deadlines.</p>
+                    </div>
+                    <button onclick="openMilestoneModal()" class="bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 px-4 py-2 rounded-lg shadow-sm transition-colors text-sm font-medium flex items-center gap-2">
+                        <i data-lucide="plus" class="w-4 h-4"></i> Add Milestone
+                    </button>
+                </div>
+                
+                <div class="relative border-l-2 border-indigo-100 ml-4 py-4 space-y-8 pl-8">
+                    ${timelineHtml}
+                </div>
+             `;
+      }
+
+      // Sub-Tab: SRS & Documents
+      function getProjectSRSTab(p) {
+        let activeDoc =
+          state.projectSRS.find((s) => s.id === state.activeSrsId) ||
+          state.projectSRS[0];
+
+        let sidebarHtml = state.projectSRS
+          .map((s, idx) => {
+            const isActive = activeDoc && activeDoc.id === s.id;
+            const isCloud = s.file_url_or_path.startsWith("http");
+            return `
+                    <div onclick="selectSRS('${s.id}')" class="p-3 border ${isActive ? "border-indigo-200 bg-indigo-50/50" : "border-slate-100 bg-white hover:bg-slate-50"} rounded-lg cursor-pointer flex justify-between items-center group transition-all">
+                        <div>
+                            <p class="text-sm font-bold ${isActive ? "text-indigo-900" : "text-slate-700 group-hover:text-brand-primary"} flex items-center gap-1">
+                                ${s.version} - ${s.document_title}
+                                ${isCloud ? '<i data-lucide="cloud" class="w-3 h-3 text-sky-500"></i>' : '<i data-lucide="file-text" class="w-3 h-3 text-slate-400"></i>'}
+                            </p>
+                            <p class="text-[10px] text-slate-500">By: ${s.approved_by || "Admin"} | ${new Date(s.created_at).toLocaleDateString()}</p>
+                        </div>
+                        ${isActive ? '<i data-lucide="chevron-right" class="w-4 h-4 text-indigo-400"></i>' : ""}
+                    </div>
+                `;
+          })
+          .join("");
+
+        if (state.projectSRS.length === 0) {
+          sidebarHtml = `<div class="text-xs text-slate-400 p-4 text-center">No specification documents uploaded for this project yet.</div>`;
+        }
+
+        let viewerHtml = "";
+        if (!activeDoc) {
+          viewerHtml = `
+                    <div class="flex-1 flex flex-col items-center justify-center text-slate-400 p-12 text-center bg-white">
+                        <i data-lucide="file-question" class="w-12 h-12 mb-3 opacity-20"></i>
+                        <p class="text-sm">Select a document from the sidebar or upload a new one to view contents.</p>
+                    </div>
+                `;
+        } else {
+          const isCloud = activeDoc.file_url_or_path.startsWith("http");
+          const fileLink = isCloud
+            ? activeDoc.file_url_or_path
+            : `http://localhost:8000/${activeDoc.file_url_or_path.replace(/\\/g, "/")}`;
+
+          // Construct Parsed Content View (Algorithms Output)
+          let parsedContentHtml = "";
+          try {
+            const parsedData = JSON.parse(activeDoc.parsed_content);
+            if (Array.isArray(parsedData)) {
+              parsedContentHtml = parsedData
+                .map((section) => {
+                  const headingHtml = `<h3 class="text-lg font-bold text-indigo-900 mt-6 mb-3 pb-2 border-b border-indigo-100 flex items-center gap-2">
+                                <i data-lucide="bookmark" class="w-4 h-4 text-indigo-400"></i> ${section.heading}
+                            </h3>`;
+                  const contentHtml = section.content
+                    .map(
+                      (p) =>
+                        `<p class="mb-2 text-sm text-slate-700 leading-relaxed text-justify">${p}</p>`,
+                    )
+                    .join("");
+                  return `<div class="mb-8">${headingHtml}${contentHtml}</div>`;
+                })
+                .join("");
+            } else {
+              parsedContentHtml = `<p class="text-sm text-slate-700 whitespace-pre-wrap">${activeDoc.parsed_content}</p>`;
+            }
+          } catch (e) {
+            // Fallback for legacy text format
+            const safeText =
+              activeDoc.parsed_content ||
+              "No raw text parsed from this document. It may be an image-only PDF or an un-fetchable cloud link.";
+            parsedContentHtml = safeText
+              .split("\n\n")
+              .map(
+                (p) =>
+                  `<p class="mb-3 text-sm text-slate-700 leading-relaxed">${p}</p>`,
+              )
+              .join("");
+          }
+
+          viewerHtml = `
+                    <div class="flex flex-col h-full bg-white">
+                        <div class="p-3 border-b border-slate-200 flex justify-between items-center bg-slate-50/50">
+                            <div class="flex items-center gap-2">
+                                <div class="p-1.5 ${isCloud ? "bg-sky-50 text-sky-600" : "bg-rose-50 text-rose-600"} rounded"><i data-lucide="${isCloud ? "cloud" : "file-pdf"}" class="w-4 h-4"></i></div>
+                                <div>
+                                    <span class="font-bold text-sm text-slate-800">${activeDoc.document_title}</span>
+                                    <span class="text-[10px] text-slate-500 ml-2">Version: ${activeDoc.version}</span>
+                                </div>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <button onclick="toggleSRSView()" class="px-3 py-1.5 bg-indigo-50 border border-indigo-200 text-indigo-700 text-xs font-bold rounded-lg hover:bg-indigo-100 transition-colors flex items-center gap-1 shadow-sm">
+                                    <i data-lucide="code" class="w-3 h-3"></i> <span id="srs-toggle-text">Show Parsed Text</span>
+                                </button>
+                                <button onclick="deleteSRS('${activeDoc.id}')" class="px-3 py-1.5 bg-rose-50 border border-rose-200 text-rose-600 text-xs font-bold rounded-lg hover:bg-rose-100 transition-colors flex items-center gap-1 shadow-sm">
+                                    <i data-lucide="trash-2" class="w-3 h-3"></i> Delete
+                                </button>
+                                <a href="${fileLink}" target="_blank" class="px-3 py-1.5 bg-white border border-slate-200 text-slate-700 text-xs font-bold rounded-lg hover:bg-slate-50 transition-colors flex items-center gap-1 shadow-sm">
+                                    <i data-lucide="external-link" class="w-3 h-3"></i> Open Original
+                                </a>
+                            </div>
+                        </div>
+                        
+                        <!-- SINGLE PANE VIEWER WITH TOGGLE -->
+                        <div class="flex-1 relative overflow-hidden bg-slate-100" style="min-height: 500px;">
+                            
+                            <!-- Visual Viewer Pane -->
+                            <div id="srs-visual-pane" class="w-full h-full flex flex-col relative">
+                                <iframe src="${fileLink}" class="w-full h-full border-0 bg-white"></iframe>
+                            </div>
+
+                            <!-- Parsed Algorithm Text Pane -->
+                            <div id="srs-parsed-pane" class="w-full h-full bg-white flex flex-col relative hidden">
+                                <div class="absolute top-0 left-0 right-0 bg-indigo-900 text-indigo-200 text-[10px] font-bold uppercase tracking-wider px-3 py-1 z-10 flex justify-between shadow-sm">
+                                    <span>Parsed Machine Text</span>
+                                    <span>Algorithm Output</span>
+                                </div>
+                                <div class="p-6 pt-10 overflow-y-auto h-full w-full custom-scrollbar selection:bg-indigo-100 selection:text-indigo-900">
+                                    ${parsedContentHtml}
+                                </div>
+                            </div>
+
+                        </div>
+                    </div>
+                `;
+        }
+
+        return `
+                <div class="grid grid-cols-1 lg:grid-cols-4 gap-6 h-full">
+                    <div class="lg:col-span-1 bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden flex flex-col max-h-[600px]">
+                        <div class="p-4 border-b border-slate-100 bg-slate-50 flex justify-between items-center">
+                            <h4 class="font-bold text-slate-800 text-sm uppercase tracking-wider">Doc Vault</h4>
+                            <button onclick="openAddSRSModal()" class="p-1.5 bg-indigo-50 text-brand-primary rounded hover:bg-indigo-100 transition-colors" title="Upload New Spec">
+                                <i data-lucide="plus" class="w-4 h-4"></i>
+                            </button>
+                        </div>
+                        <div class="flex-1 overflow-y-auto p-4 space-y-2 custom-scrollbar">
+                            ${sidebarHtml}
+                        </div>
+                    </div>
+                    
+                    <div class="lg:col-span-3 border border-slate-200 rounded-xl shadow-sm overflow-hidden flex flex-col bg-slate-100 max-h-[600px]">
+                        ${viewerHtml}
+                    </div>
+                </div>
+            `;
+      }
+
+      function selectSRS(srsId) {
+        state.activeSrsId = srsId;
+        renderAdminApp(); // re-renders the active tab
+      }
+
+      function toggleSRSView() {
+        const visual = document.getElementById("srs-visual-pane");
+        const parsed = document.getElementById("srs-parsed-pane");
+        const toggleText = document.getElementById("srs-toggle-text");
+
+        if (visual.classList.contains("hidden")) {
+          visual.classList.remove("hidden");
+          parsed.classList.add("hidden");
+          toggleText.innerText = "Show Parsed Text";
+        } else {
+          visual.classList.add("hidden");
+          parsed.classList.remove("hidden");
+          toggleText.innerText = "Show Original PDF";
+        }
+      }
+
+      async function deleteSRS(srsId) {
+        const isConfirmed = await customConfirm(
+          "Delete Document",
+          "Are you sure you want to permanently delete this SRS document?",
+          "Delete",
+          "Cancel",
+          true,
+        );
+        if (!isConfirmed) return;
+
+        try {
+          const response = await apiFetch(`/projects/srs/delete/${srsId}`, {
+            method: "DELETE",
+          });
+          showToast("SRS Document deleted successfully", "success");
+
+          // Remove from state
+          state.projectSRS = state.projectSRS.filter((s) => s.id !== srsId);
+          if (state.activeSrsId === srsId) state.activeSrsId = null;
+
+          renderAdminApp();
+        } catch (error) {
+          showToast(error.message || "Failed to delete SRS document", "error");
+        }
+      }
+
+      function openAddSRSModal() {
+        const html = `
+                <form onsubmit="handleSRSUpload(event)" class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-semibold text-slate-700 mb-1">Document Title *</label>
+                        <input type="text" id="up_srs_title" required placeholder="e.g., Phase 2 API Specs" class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-semibold text-slate-700 mb-1">Version Iteration *</label>
+                        <input type="text" id="up_srs_version" required placeholder="v1.1" value="v1.0" class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm">
+                    </div>
+                    
+                    <div class="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-4">
+                        <p class="text-xs font-bold text-slate-500 uppercase tracking-wider">Source Material (Choose One)</p>
+                        
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-1"><i data-lucide="upload-cloud" class="w-4 h-4 inline mr-1 text-brand-primary"></i> Direct PDF Upload</label>
+                            <input type="file" id="up_srs_file" accept="application/pdf" class="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-brand-primary hover:file:bg-indigo-100 cursor-pointer">
+                        </div>
+                        
+                        <div class="relative flex items-center py-2">
+                            <div class="flex-grow border-t border-slate-300"></div>
+                            <span class="flex-shrink-0 mx-4 text-slate-400 text-xs font-medium">OR</span>
+                            <div class="flex-grow border-t border-slate-300"></div>
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-1"><i data-lucide="link" class="w-4 h-4 inline mr-1 text-sky-500"></i> Cloud Document Link</label>
+                            <input type="url" id="up_srs_link" placeholder="https://docs.google.com/..." class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm">
+                        </div>
+                    </div>
+
+                    <div id="srsErrorBanner" class="hidden bg-rose-50 border border-rose-200 text-brand-alert px-4 py-3 rounded-lg text-sm items-start shadow-sm mt-4">
+                        <i data-lucide="alert-circle" class="w-4 h-4 mr-2 mt-0.5 flex-shrink-0"></i>
+                        <span id="srsErrorMessage">Error message</span>
+                    </div>
+
+                    <div class="mt-6 flex justify-end gap-3 pt-4 border-t border-slate-100">
+                        <button type="button" onclick="closeModal()" class="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg font-medium transition-colors">Cancel</button>
+                        <button type="submit" id="btnSubmitSRS" class="px-5 py-2 bg-slate-900 text-white rounded-lg font-medium shadow-sm hover:bg-black transition-all flex items-center gap-2">
+                            <i data-lucide="upload" class="w-4 h-4"></i> Process & Store Spec
+                        </button>
+                    </div>
+                </form>
+            `;
+        openModal("Add Project Specification", html);
+      }
+
+      async function handleSRSUpload(event) {
+        event.preventDefault();
+        const btn = document.getElementById("btnSubmitSRS");
+        const originalText = btn.innerHTML;
+        btn.innerHTML =
+          '<i data-lucide="loader-2" class="w-4 h-4 mr-2 animate-spin"></i> Parsing PDF...';
+        btn.disabled = true;
+        document.getElementById("srsErrorBanner").classList.add("hidden");
+        lucide.createIcons();
+
+        const p = state.activeProject;
+        const fileInput = document.getElementById("up_srs_file").files[0];
+        const linkInput = document.getElementById("up_srs_link").value;
+
+        if (!fileInput && !linkInput) {
+          document.getElementById("srsErrorMessage").innerText =
+            "You must provide either a PDF file or a Cloud link.";
+          document.getElementById("srsErrorBanner").classList.remove("hidden");
+          document.getElementById("srsErrorBanner").classList.add("flex");
+          btn.innerHTML = originalText;
+          btn.disabled = false;
+          lucide.createIcons();
+          return;
+        }
+
+        const formData = new FormData();
+        formData.append("project_id", p.id);
+        formData.append("project_name", p.name);
+        formData.append(
+          "document_title",
+          document.getElementById("up_srs_title").value,
+        );
+        formData.append(
+          "version",
+          document.getElementById("up_srs_version").value,
+        );
+
+        if (fileInput) formData.append("file", fileInput);
+        if (linkInput) formData.append("cloud_link", linkInput);
+
+        try {
+          // Notice we are using the new Uploads endpoint, not the raw JSON endpoint
+          await apiFetch("/uploads/srs/", {
+            method: "POST",
+            body: formData, // Using FormData for multipart/form-data upload
+          });
+
+          showToast("Document uploaded and parsed successfully!", "success");
+          closeModal();
+
+          // Detach the background refresh to allow the modal to close smoothly
+          setTimeout(() => {
+            openProjectDetails(p.id);
+          }, 300);
+        } catch (err) {
+          document.getElementById("srsErrorMessage").innerText = err.message;
+          document.getElementById("srsErrorBanner").classList.remove("hidden");
+          document.getElementById("srsErrorBanner").classList.add("flex");
+        } finally {
+          btn.innerHTML = originalText;
+          btn.disabled = false;
+          lucide.createIcons();
+        }
+      }
+
+      // --- Assignment Modal & Functions ---
+      function openAssignmentModal() {
+        const p = state.activeProject;
+        if (!p) return;
+
+        const options = state.allEmployees
+          .filter(
+            (e) =>
+              !state.projectAssignments.some((a) => a.employee_id === e.id),
+          )
+          .map(
+            (e) =>
+              `<option value="${e.id}">${e.full_name} (${e.department || "Employee"})</option>`,
+          )
+          .join("");
+
+        window.updateAssignCostDisplay = function () {
+          const empId = document.getElementById("assign_employee_id").value;
+          const display = document.getElementById("assign_cost_display");
+          if (!empId) {
+            display.value = "-";
+            return;
+          }
+          const emp = state.allEmployees.find((e) => e.id === empId);
+          display.value = emp ? (emp.hourly_cost_rate || 0).toFixed(2) : "-";
+        };
+
+        const html = `
+                <form onsubmit="handleAssignmentSave(event)" class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-semibold text-slate-700 mb-1">Select Employee *</label>
+                        <select id="assign_employee_id" required onchange="updateAssignCostDisplay()" class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm">
+                            <option value="">-- Choose Employee --</option>
+                            ${options}
+                        </select>
+                    </div>
+                    <div class="grid grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-sm font-semibold text-slate-700 mb-1">Fixed Cost Rate (₹/hr)</label>
+                            <input type="text" id="assign_cost_display" readonly value="-" class="input-field w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-lg outline-none text-sm shadow-sm cursor-not-allowed text-slate-500">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-semibold text-slate-700 mb-1">Custom Billing Rate (₹/hr)</label>
+                            <input type="number" id="assign_billing" step="0.01" min="0" placeholder="Optional" class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm">
+                        </div>
+                    </div>
+                    <p class="text-xs text-slate-500">Billing rate blank will default to the employee's standard profile rates.</p>
+                    <div id="assignErrorBanner" class="hidden bg-rose-50 border border-rose-200 text-brand-alert px-4 py-3 rounded-lg text-sm items-start shadow-sm mt-4">
+                        <i data-lucide="alert-circle" class="w-4 h-4 mr-2 mt-0.5 flex-shrink-0"></i>
+                        <span id="assignErrorMessage">Error message</span>
+                    </div>                    <div class="mt-6 flex justify-end gap-3 pt-4 border-t border-slate-100">
+                        <button type="button" onclick="closeModal()" class="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg font-medium transition-colors">Cancel</button>
+                        <button type="submit" id="btnSubmitAssign" class="px-5 py-2 bg-slate-900 text-white rounded-lg font-medium shadow-sm hover:bg-black transition-all flex items-center gap-2">
+                            <i data-lucide="check" class="w-4 h-4"></i> Assign Employee
+                        </button>
+                    </div>
+                </form>
+            `;
+        openModal("Assign Team Member", html);
+      }
+
+      async function handleAssignmentSave(event) {
+        event.preventDefault();
+        const btn = document.getElementById("btnSubmitAssign");
+        const originalText = btn.innerHTML;
+        btn.innerHTML =
+          '<i data-lucide="loader-2" class="w-4 h-4 mr-2 animate-spin"></i> Saving...';
+        btn.disabled = true;
+        document.getElementById("assignErrorBanner").classList.add("hidden");
+
+        try {
+          const payload = {
+            project_id: state.activeProject.id,
+            employee_id: document.getElementById("assign_employee_id").value,
+          };
+
+          const c_bill = document.getElementById("assign_billing").value;
+          if (c_bill) payload.custom_hourly_billing = parseFloat(c_bill);
+
+          await apiFetch("/projects/assign", { method: "POST", body: payload });
+          showToast("Employee assigned successfully", "success");
+          closeModal();
+          await openProjectDetails(state.activeProject.id);
+        } catch (err) {
+          document.getElementById("assignErrorMessage").innerText = err.message;
+          document
+            .getElementById("assignErrorBanner")
+            .classList.remove("hidden");
+          document.getElementById("assignErrorBanner").classList.add("flex");
+        } finally {
+          btn.innerHTML = originalText;
+          btn.disabled = false;
+          lucide.createIcons();
+        }
+      }
+      async function unassignEmployee(assignmentId) {
+        const isConfirmed = await customConfirm(
+          "Remove Employee",
+          "Are you sure you want to remove this employee from the project?",
+          "Remove",
+          "Cancel",
+          true,
+        );
+        if (!isConfirmed) return;
+        try {
+          await apiFetch(`/projects/unassign/${assignmentId}`, {
+            method: "DELETE",
+          });
+          showToast("Employee removed successfully", "success");
+          await openProjectDetails(state.activeProject.id);
+        } catch (err) {
+          showToast(err.message, "error");
+        }
+      }
+
+      // --- Milestone Modal & Functions ---
+      function openMilestoneModal() {
+        const p = state.activeProject;
+        if (!p) return;
+
+        const html = `
+                <form onsubmit="handleMilestoneSave(event)" class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-semibold text-slate-700 mb-1">Milestone Name *</label>
+                        <input type="text" id="milestone_name" required placeholder="e.g., Phase 1: Planning" class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm">
+                    </div>
+                    <div class="grid grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-sm font-semibold text-slate-700 mb-1">Expected Start Date</label>
+                            <input type="date" id="milestone_start" class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-semibold text-slate-700 mb-1">Expected End Date</label>
+                            <input type="date" id="milestone_end" class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm">
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-semibold text-slate-700 mb-1">Status</label>
+                        <select id="milestone_status" class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm">
+                            <option value="Pending">Pending</option>
+                            <option value="Active">Active</option>
+                            <option value="Delayed">Delayed</option>
+                            <option value="Completed">Completed</option>
+                        </select>
+                    </div>
+                    <div id="milestoneErrorBanner" class="hidden bg-rose-50 border border-rose-200 text-brand-alert px-4 py-3 rounded-lg text-sm items-start shadow-sm mt-4">
+                        <i data-lucide="alert-circle" class="w-4 h-4 mr-2 mt-0.5 flex-shrink-0"></i>
+                        <span id="milestoneErrorMessage">Error message</span>
+                    </div>
+                    <div class="mt-6 flex justify-end gap-3 pt-4 border-t border-slate-100">
+                        <button type="button" onclick="closeModal()" class="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg font-medium transition-colors">Cancel</button>
+                        <button type="submit" id="btnSubmitMilestone" class="px-5 py-2 bg-brand-primary text-white rounded-lg font-medium shadow-sm hover:bg-indigo-700 transition-all flex items-center gap-2">
+                            <i data-lucide="check" class="w-4 h-4"></i> Add Milestone
+                        </button>
+                    </div>
+                </form>
+            `;
+        openModal("Add Project Milestone", html);
+      }
+
+      async function handleMilestoneSave(event) {
+        event.preventDefault();
+        const btn = document.getElementById("btnSubmitMilestone");
+        const originalText = btn.innerHTML;
+        btn.innerHTML =
+          '<i data-lucide="loader-2" class="w-4 h-4 mr-2 animate-spin"></i> Saving...';
+        btn.disabled = true;
+        document.getElementById("milestoneErrorBanner").classList.add("hidden");
+
+        try {
+          const payload = {
+            project_id: state.activeProject.id,
+            milestone_name: document.getElementById("milestone_name").value,
+            status: document.getElementById("milestone_status").value,
+          };
+
+          const ms = document.getElementById("milestone_start").value;
+          const me = document.getElementById("milestone_end").value;
+          if (ms) payload.expected_start = new Date(ms).toISOString();
+          if (me) payload.expected_end = new Date(me).toISOString();
+
+          await apiFetch("/projects/timeline/create", {
+            method: "POST",
+            body: payload,
+          });
+          showToast("Milestone added successfully", "success");
+          closeModal();
+          await openProjectDetails(state.activeProject.id);
+        } catch (err) {
+          document.getElementById("milestoneErrorMessage").innerText =
+            err.message;
+          document
+            .getElementById("milestoneErrorBanner")
+            .classList.remove("hidden");
+          document.getElementById("milestoneErrorBanner").classList.add("flex");
+        } finally {
+          btn.innerHTML = originalText;
+          btn.disabled = false;
+          lucide.createIcons();
+        }
+      }
+
+      async function markMilestoneComplete(milestoneId) {
+        const isConfirmed = await customConfirm(
+          "Complete Milestone",
+          "Are you sure you want to mark this milestone as Completed? This will set its actual completion date to today.",
+          "Complete",
+          "Cancel",
+          false,
+        );
+        if (!isConfirmed) return;
+        try {
+          await apiFetch(`/projects/timeline/update/${milestoneId}`, {
+            method: "PUT",
+            body: {
+              status: "Completed",
+              actual_end: new Date().toISOString(),
+            },
+          });
+          showToast("Milestone marked as complete!", "success");
+          await openProjectDetails(state.activeProject.id);
+        } catch (err) {
+          showToast("Failed to update milestone: " + err.message, "error");
+        }
+      }
+
+      async function deleteMilestone(milestoneId) {
+        const isConfirmed = await customConfirm(
+          "Delete Milestone",
+          "Are you sure you want to delete this milestone? This action cannot be undone.",
+          "Delete",
+          "Cancel",
+          true,
+        );
+        if (!isConfirmed) return;
+        try {
+          await apiFetch(`/projects/timeline/delete/${milestoneId}`, {
+            method: "DELETE",
+          });
+          showToast("Milestone deleted successfully", "success");
+          await openProjectDetails(state.activeProject.id);
+        } catch (err) {
+          showToast("Failed to delete milestone: " + err.message, "error");
+        }
+      }
+
+      async function openMilestoneDetails(milestoneId) {
+        const m = state.projectTimeline.find((x) => x.id === milestoneId);
+        if (!m) return;
+        
+        const [assignmentsRes] = await Promise.all([
+          apiFetch(`/projects/timeline/assignments/${milestoneId}`).catch(() => [])
+        ]);
+        const assignments = Array.isArray(assignmentsRes) ? assignmentsRes : [];
+
+
+        let statusColor = "bg-slate-100 text-slate-700";
+        if (m.status === "Completed")
+          statusColor = "bg-emerald-100 text-emerald-800";
+        if (m.status === "Active" || m.status === "In Progress")
+          statusColor = "bg-indigo-100 text-indigo-800";
+        if (m.status === "Delayed") statusColor = "bg-amber-100 text-amber-800";
+
+        const expStart = m.expected_start
+          ? new Date(m.expected_start).toLocaleDateString()
+          : "Not Set";
+        const expEnd = m.expected_end
+          ? new Date(m.expected_end).toLocaleDateString()
+          : "Not Set";
+        const actStart = m.actual_start
+          ? new Date(m.actual_start).toLocaleDateString()
+          : "Not Started";
+        const actEnd = m.actual_end
+          ? new Date(m.actual_end).toLocaleDateString()
+          : "Not Completed";
+
+        let employeeCardsHtml = assignments.length === 0 ? 
+            `<div class="col-span-full text-center py-4 text-sm text-slate-500 bg-white border border-dashed border-slate-200 rounded-lg">No employees assigned to this milestone.</div>` :
+            assignments.map(a => `
+                <div class="bg-white border border-slate-100 p-3 rounded-lg flex items-center justify-between shadow-sm">
+                    <div class="flex items-center gap-3">
+                        <div class="w-8 h-8 rounded-full bg-indigo-100 flex items-center justify-center text-indigo-700 font-bold text-xs shrink-0 relative overflow-hidden">
+                            ${a.photo && a.photo !== "N/A" ? `<img src="${CONFIG.API_BASE_URL.replace('/api', '')}/${a.photo}" class="w-full h-full object-cover">` : a.full_name.substring(0, 2).toUpperCase()}
+                        </div>
+                        <div>
+                            <p class="text-sm font-bold text-slate-800 leading-tight">${a.full_name}</p>
+                            <p class="text-[10px] text-slate-500 uppercase tracking-wider">${a.job_title}</p>
+                        </div>
+                    </div>
+                    <button onclick="unassignMilestoneEmployee('${a.id}', '${milestoneId}')" class="text-slate-400 hover:text-rose-500 transition-colors p-1" title="Remove">
+                        <i data-lucide="x" class="w-4 h-4"></i>
+                    </button>
+                </div>
+            `).join("");
+
+        const availableEmployees = state.allEmployees.filter(emp => !assignments.some(a => a.employee_id === emp.id));
+        let employeeOptions = '<option value="">Select Employee...</option>' + availableEmployees.map(emp => `<option value="${emp.id}">${emp.full_name}</option>`).join("");
+
+        const html = `
+                <div class="space-y-6">
+                    <div class="flex items-center justify-between pb-4 border-b border-slate-100">
+                        <h3 class="text-lg font-bold text-slate-900">${m.milestone_name}</h3>
+                        <span class="px-3 py-1 text-xs font-bold uppercase tracking-wider rounded-md ${statusColor}">${m.status}</span>
+                    </div>
+                    
+                    <div class="grid grid-cols-2 gap-6 bg-slate-50 p-4 rounded-xl border border-slate-100">
+                        <div>
+                            <h4 class="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2"><i data-lucide="calendar" class="w-3 h-3 inline mr-1"></i> Planning</h4>
+                            <div class="space-y-2">
+                                <div class="flex justify-between text-sm">
+                                    <span class="text-slate-600">Expected Start:</span>
+                                    <span class="font-medium text-slate-900">${expStart}</span>
+                                </div>
+                                <div class="flex justify-between text-sm">
+                                    <span class="text-slate-600">Expected End:</span>
+                                    <span class="font-medium text-slate-900">${expEnd}</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div>
+                            <h4 class="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2"><i data-lucide="activity" class="w-3 h-3 inline mr-1"></i> Execution</h4>
+                            <div class="space-y-2">
+                                <div class="flex justify-between text-sm">
+                                    <span class="text-slate-600">Actual Start:</span>
+                                    <span class="font-medium ${m.actual_start ? "text-indigo-600" : "text-slate-400"}">${actStart}</span>
+                                </div>
+                                <div class="flex justify-between text-sm">
+                                    <span class="text-slate-600">Actual End:</span>
+                                    <span class="font-medium ${m.actual_end ? "text-emerald-600" : "text-slate-400"}">${actEnd}</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    ${
+                      m.status !== "Completed"
+                        ? `
+                    <div class="bg-indigo-50 border border-indigo-100 rounded-xl p-4 flex items-center justify-between mt-4">
+                        <div>
+                            <h4 class="text-sm font-bold text-indigo-900">Advance Phase</h4>
+                            <p class="text-xs text-indigo-700/70">Mark this milestone as completed to update the timeline.</p>
+                        </div>
+                        <button onclick="closeModal(); setTimeout(() => markMilestoneComplete('${m.id}'), 300)" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium rounded-lg shadow-sm transition-colors flex items-center gap-2">
+                            <i data-lucide="check-circle" class="w-4 h-4"></i> Complete
+                        </button>
+                    </div>
+                    `
+                        : `
+                    <div class="bg-emerald-50 border border-emerald-100 rounded-xl p-4 flex items-center justify-center gap-2 text-emerald-700 font-medium text-sm">
+                        <i data-lucide="check-circle" class="w-5 h-5"></i> Milestone successfully completed
+                    </div>
+                    `
+                    }
+                    <div class="mt-6 border-t border-slate-100 pt-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <h4 class="text-sm font-bold text-slate-800">Assigned Employees</h4>
+                        </div>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4" id="milestone-employee-cards">
+                            ${employeeCardsHtml}
+                        </div>
+                        <div class="flex gap-2 items-end">
+                            <div class="flex-1">
+                                <select id="assign_milestone_employee_id" class="input-field w-full px-3 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm">
+                                    ${employeeOptions}
+                                </select>
+                            </div>
+                            <button onclick="assignMilestoneEmployee('${m.id}')" class="px-4 py-2 bg-indigo-50 hover:bg-indigo-100 text-brand-primary text-sm font-medium rounded-lg shadow-sm transition-colors flex items-center gap-2 border border-indigo-200 shrink-0">
+                                <i data-lucide="user-plus" class="w-4 h-4"></i> Assign
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="pt-4 border-t border-slate-100 flex justify-end">
+                        <button type="button" onclick="closeModal()" class="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg font-medium transition-colors">Close Details</button>
+                    </div>
+                </div>
+            `;
+        openModal("Milestone Inspection", html);
+      }
+
+      async function assignMilestoneEmployee(milestoneId) {
+        const empId = document.getElementById("assign_milestone_employee_id").value;
+        if (!empId) return;
+        try {
+          await apiFetch("/projects/timeline/assign", { method: "POST", body: { milestone_id: milestoneId, employee_id: empId } });
+          showToast("Employee assigned to milestone", "success");
+          closeModal();
+          setTimeout(() => openMilestoneDetails(milestoneId), 300);
+        } catch (err) {
+          showToast(err.message, "error");
+        }
+      }
+
+      async function unassignMilestoneEmployee(assignmentId, milestoneId) {
+        const isConfirmed = await customConfirm("Remove Employee", "Remove this employee from the milestone?", "Remove", "Cancel", true);
+        if (!isConfirmed) return;
+        try {
+          await apiFetch(`/projects/timeline/unassign/${assignmentId}`, { method: "DELETE" });
+          showToast("Employee removed from milestone", "success");
+          closeModal();
+          setTimeout(() => openMilestoneDetails(milestoneId), 300);
+        } catch (err) {
+          showToast(err.message, "error");
+        }
+      }
+
+      function openProjectModal(projectId = null) {
+        let p = null;
+        if (projectId) {
+          p = state.allProjects.find((x) => x.id === projectId);
+        }
+        const isEdit = !!p;
+
+        const managerOptions = state.allAdmins
+          .filter(
+            (a) =>
+              a.access_level === "ManagerAdmin" ||
+              a.access_level === "SystemAdmin",
+          )
+          .map(
+            (m) =>
+              `<option value="${m.username}" ${p && p.manager === m.username ? "selected" : ""}>${m.username} (${m.access_level})</option>`,
+          )
+          .join("");
+
+        const formHtml = `
+                <form id="adminProjectForm" onsubmit="handleProjectSave(event, '${projectId || ""}')" class="space-y-6">
+                    
+                    <!-- Section: Core Details -->
+                    <div class="bg-slate-50/50 p-5 rounded-xl border border-slate-100">
+                        <h4 class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4 flex items-center"><i data-lucide="info" class="w-4 h-4 mr-2"></i> Core Details</h4>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div class="md:col-span-2">
+                                <label class="block text-sm font-semibold text-slate-700 mb-1">Project Name *</label>
+                                <input type="text" id="p_name" value="${p && p.name !== "N/A" ? p.name : ""}" required class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-semibold text-slate-700 mb-1">Project Nature *</label>
+                                <select id="p_type" required class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm">
+                                    <option value="Engineering" ${p && p.project_type === "Engineering" ? "selected" : ""}>Engineering / IT</option>
+                                    <option value="Content" ${p && p.project_type === "Content" ? "selected" : ""}>Content / Marketing</option>
+                                    <option value="Both" ${p && p.project_type === "Both" ? "selected" : ""}>Both</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-semibold text-slate-700 mb-1">Project Manager *</label>
+                                <select id="p_manager" required class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm">
+                                    <option value="">-- Select Manager --</option>
+                                    ${managerOptions}
+                                </select>
+                            </div>
+                            <div>
+                                <div class="flex justify-between items-center mb-1">
+                                    <label class="block text-sm font-semibold text-slate-700">Client Name</label>
+                                    <button type="button" onclick="openClientCreateModal('projects')" class="text-xs text-brand-600 hover:text-brand-800 font-medium flex items-center"><i data-lucide="plus" class="w-3 h-3 mr-1"></i> New Client</button>
+                                </div>
+                                <select id="p_client" class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm">
+                                    <option value="">-- Internal / No Client --</option>
+                                    ${state.allClients.map((c) => `<option value="${c.name}" ${p && p.client === c.name ? "selected" : ""}>${c.name} ${c.company !== "N/A" ? `(${c.company})` : ""}</option>`).join("")}
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Section: Execution & Financials -->
+                    <div class="bg-slate-50/50 p-5 rounded-xl border border-slate-100">
+                        <h4 class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4 flex items-center"><i data-lucide="activity" class="w-4 h-4 mr-2"></i> Execution & Financials</h4>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-sm font-semibold text-slate-700 mb-1">Status</label>
+                                <select id="p_status" class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm">
+                                    <option value="Planning" ${p && p.status === "Planning" ? "selected" : ""}>Planning</option>
+                                    <option value="In Progress" ${p && (p.status === "In Progress" || p.status === "Active") ? "selected" : ""}>In Progress</option>
+                                    <option value="At Risk" ${p && p.status === "At Risk" ? "selected" : ""}>At Risk</option>
+                                    <option value="Completed" ${p && p.status === "Completed" ? "selected" : ""}>Completed</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-semibold text-slate-700 mb-1">Progress (%)</label>
+                                <div class="flex items-center gap-3 mt-2 pr-4">
+                                    <input type="range" id="p_progress_slider" min="0" max="100" value="${p && p.progress ? parseInt(p.progress) : 0}" class="flex-1 h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer" oninput="document.getElementById('p_progress_val').innerText = this.value + '%'">
+                                    <span id="p_progress_val" class="text-sm font-bold text-slate-700 w-12 text-right">${p && p.progress && p.progress !== "N/A" ? p.progress : "0%"}</span>
+                                </div>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-semibold text-slate-700 mb-1">Budget (₹) *</label>
+                                <input type="number" id="p_budget" value="${p && p.budget ? p.budget : "0"}" step="0.01" min="0" required class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-semibold text-slate-700 mb-1">Client Cost (₹)</label>
+                                <input type="number" id="p_client_cost" value="${p && p.client_cost ? p.client_cost : "0"}" step="0.01" min="0" class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm">
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Section: Additional Details -->
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 px-1">
+                        <div>
+                            <label class="block text-sm font-semibold text-slate-700 mb-1">Start Date</label>
+                            <input type="date" id="p_start" value="${p && p.start_date && p.start_date !== "N/A" ? p.start_date.split("T")[0] : ""}" class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-semibold text-slate-700 mb-1">End Date</label>
+                            <input type="date" id="p_end" value="${p && p.end_date && p.end_date !== "N/A" ? p.end_date.split("T")[0] : ""}" class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm">
+                        </div>
+                        <div class="md:col-span-2">
+                            <label class="block text-sm font-semibold text-slate-700 mb-1">Cost Type / Category</label>
+                            <select id="p_cost_type" class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm">
+                                <option value="Mobile App" ${p && p.cost_type === "Mobile App" ? "selected" : ""}>Mobile App</option>
+                                <option value="Website" ${p && p.cost_type === "Website" ? "selected" : ""}>Website</option>
+                                <option value="Software" ${(p && p.cost_type === "Software") || !p || !p.cost_type ? "selected" : ""}>Software</option>
+                                <option value="Social Media" ${p && p.cost_type === "Social Media" ? "selected" : ""}>Social Media</option>
+                                <option value="Graphics" ${p && p.cost_type === "Graphics" ? "selected" : ""}>Graphics</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- NEW: SRS Document Integration -->
+                    <div class="bg-indigo-50/50 p-5 rounded-xl border border-indigo-100 mt-2">
+                        <div class="flex justify-between items-center mb-4">
+                            <h4 class="text-xs font-bold text-indigo-500 uppercase tracking-wider flex items-center"><i data-lucide="file-text" class="w-4 h-4 mr-2"></i> SRS Document Configuration</h4>
+                            <span class="text-[10px] bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded font-bold uppercase">Optional</span>
+                        </div>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div class="md:col-span-2">
+                                <label class="block text-sm font-semibold text-slate-700 mb-1">SRS Document (PDF)</label>
+                                <input type="file" id="srs_file" accept="application/pdf" class="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100 cursor-pointer">
+                                <p class="text-xs text-slate-500 mt-1">Upload the active SRS document (PDF only).</p>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-semibold text-slate-700 mb-1">Document Title</label>
+                                <input type="text" id="srs_title" placeholder="e.g., Initial Specs" class="input-field w-full px-4 py-2 bg-white border border-indigo-200 focus:border-indigo-500 rounded-lg outline-none text-sm shadow-sm">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-semibold text-slate-700 mb-1">Version</label>
+                                <input type="text" id="srs_version" placeholder="v1.0" class="input-field w-full px-4 py-2 bg-white border border-indigo-200 focus:border-indigo-500 rounded-lg outline-none text-sm shadow-sm">
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Error Banner -->
+                    <div id="modalErrorBanner" class="hidden bg-rose-50 border border-rose-200 text-brand-alert px-4 py-3 rounded-lg text-sm items-start shadow-sm mt-4">
+                        <i data-lucide="alert-circle" class="w-4 h-4 mr-2 mt-0.5 flex-shrink-0"></i>
+                        <span id="modalErrorMessage">Error message</span>
+                    </div>
+
+                    <!-- Actions -->
+                    <div class="mt-6 flex justify-end gap-3 pt-4 border-t border-slate-100">
+                        <button type="button" onclick="closeModal()" class="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg font-medium transition-colors">Cancel</button>
+                        <button type="submit" id="btnSubmitProject" class="px-5 py-2 bg-brand-primary text-white rounded-lg font-medium shadow-sm hover:bg-indigo-700 transition-all flex items-center gap-2">
+                            <i data-lucide="check" class="w-4 h-4"></i> Save Project Configuration
+                        </button>
+                    </div>
+                </form>
+            `;
+        openModal(
+          isEdit ? "Edit Project Workspace" : "Initialize New Project",
+          formHtml,
+        );
+      }
+
+      function openAddManagerModal() {
+        const formHtml = `
+                <form onsubmit="handleManagerSave(event)" class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-semibold text-slate-700 mb-1">Manager Full Name *</label>
+                        <input type="text" id="new_manager_name" required placeholder="e.g. John Doe" class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm">
+                    </div>
+                    <div id="managerErrorBanner" class="hidden bg-rose-50 border border-rose-200 text-brand-alert px-4 py-3 rounded-lg text-sm items-start shadow-sm mt-4">
+                        <i data-lucide="alert-circle" class="w-4 h-4 mr-2 mt-0.5 flex-shrink-0"></i>
+                        <span id="managerErrorMessage">Error message</span>
+                    </div>
+                    <div class="mt-6 flex justify-end gap-3 pt-4 border-t border-slate-100">
+                        <button type="button" onclick="closeModal(); setTimeout(() => openProjectModal(), 300)" class="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg font-medium transition-colors">Cancel</button>
+                        <button type="submit" id="btnSubmitManager" class="px-5 py-2 bg-brand-primary text-white rounded-lg font-medium shadow-sm hover:bg-indigo-700 transition-all flex items-center gap-2">
+                            <i data-lucide="check" class="w-4 h-4"></i> Create Manager
+                        </button>
+                    </div>
+                </form>
+            `;
+        openModal("Create New Manager", formHtml);
+      }
+
+      async function handleManagerSave(event) {
+        event.preventDefault();
+        const btn = document.getElementById("btnSubmitManager");
+        const originalText = btn.innerHTML;
+        btn.innerHTML =
+          '<i data-lucide="loader-2" class="w-4 h-4 mr-2 animate-spin"></i> Saving...';
+        btn.disabled = true;
+        document.getElementById("managerErrorBanner").classList.add("hidden");
+
+        try {
+          const name = document.getElementById("new_manager_name").value;
+          const response = await apiFetch("/projects/managers/create", {
+            method: "POST",
+            body: { name },
+          });
+
+          state.allManagers.push(response);
+          showToast("Manager created successfully", "success");
+
+          closeModal();
+          // Re-open project modal after creating manager so they can continue creating the project
+          setTimeout(() => openProjectModal(), 300);
+        } catch (err) {
+          document.getElementById("managerErrorMessage").innerText =
+            err.message;
+          document
+            .getElementById("managerErrorBanner")
+            .classList.remove("hidden");
+          document.getElementById("managerErrorBanner").classList.add("flex");
+        } finally {
+          btn.innerHTML = originalText;
+          btn.disabled = false;
+          lucide.createIcons();
+        }
+      }
+
+      function openClientCreateModal(source = "clients") {
+        const formHtml = `
+                <form onsubmit="handleClientSave(event, '${source}')" class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-semibold text-slate-700 mb-1">Client Name *</label>
+                        <input type="text" id="new_client_name" required placeholder="e.g. Acme Corp" class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-semibold text-slate-700 mb-1">Company / Organization</label>
+                        <input type="text" id="new_client_company" placeholder="e.g. Acme Corporation" class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm">
+                    </div>
+                    <div class="grid grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-sm font-semibold text-slate-700 mb-1">Email</label>
+                            <input type="email" id="new_client_email" placeholder="contact@acme.com" class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-semibold text-slate-700 mb-1">Phone</label>
+                            <input type="text" id="new_client_phone" placeholder="+1 234 567 890" class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm">
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-semibold text-slate-700 mb-1">Physical Address</label>
+                        <textarea id="new_client_address" rows="3" placeholder="Enter physical address..." class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none text-sm shadow-sm"></textarea>
+                    </div>
+                    <div id="clientErrorBanner" class="hidden bg-rose-50 border border-rose-200 text-brand-alert px-4 py-3 rounded-lg text-sm items-start shadow-sm mt-4">
+                        <i data-lucide="alert-circle" class="w-4 h-4 mr-2 mt-0.5 flex-shrink-0"></i>
+                        <span id="clientErrorMessage">Error message</span>
+                    </div>
+                    <div class="mt-6 flex justify-end gap-3 pt-4 border-t border-slate-100">
+                        <button type="button" onclick="closeModal(); ${source === "projects" ? "setTimeout(() => openProjectModal(), 300)" : ""}" class="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg font-medium transition-colors">Cancel</button>
+                        <button type="submit" id="btnSubmitClient" class="px-5 py-2 bg-brand-primary text-white rounded-lg font-medium shadow-sm hover:bg-indigo-700 transition-all flex items-center gap-2">
+                            <i data-lucide="check" class="w-4 h-4"></i> Create Client
+                        </button>
+                    </div>
+                </form>
+            `;
+        openModal("Create New Client", formHtml);
+      }
+
+      async function handleClientSave(event, source = "clients") {
+        event.preventDefault();
+        const btn = document.getElementById("btnSubmitClient");
+        const originalText = btn.innerHTML;
+        btn.innerHTML =
+          '<i data-lucide="loader-2" class="w-4 h-4 mr-2 animate-spin"></i> Creating...';
+        btn.disabled = true;
+        document.getElementById("clientErrorBanner").classList.add("hidden");
+
+        try {
+          const payload = {
+            name: document.getElementById("new_client_name").value,
+            company:
+              document.getElementById("new_client_company").value || "N/A",
+            email: document.getElementById("new_client_email").value || null,
+            phone: document.getElementById("new_client_phone").value || "N/A",
+            address:
+              document.getElementById("new_client_address").value || "N/A",
+          };
+
+          const response = await apiFetch("/clients/create", {
+            method: "POST",
+            body: payload,
+          });
+
+          // Update local state
+          state.allClients.push(response);
+
+          showToast("Client created successfully", "success");
+          closeModal();
+
+          if (source === "projects") {
+            // Re-open project modal and select the new client
+            openProjectModal();
+            setTimeout(() => {
+              const select = document.getElementById("p_client");
+              if (select) {
+                const option = document.createElement("option");
+                option.value = response.name;
+                option.text = response.name;
+                option.selected = true;
+                select.add(option);
+              }
+            }, 500);
+          } else {
+            renderAdminApp();
+          }
+        } catch (err) {
+          document.getElementById("clientErrorMessage").innerText = err.message;
+          document
+            .getElementById("clientErrorBanner")
+            .classList.remove("hidden");
+          document.getElementById("clientErrorBanner").classList.add("flex");
+        } finally {
+          btn.innerHTML = originalText;
+          btn.disabled = false;
+          lucide.createIcons();
+        }
+      }
+
+      async function handleProjectSave(event, projectId) {
+        event.preventDefault();
+        const btn = document.getElementById("btnSubmitProject");
+        const originalText = btn.innerHTML;
+        btn.innerHTML =
+          '<i data-lucide="loader-2" class="w-4 h-4 mr-2 animate-spin"></i> Processing...';
+        btn.disabled = true;
+        document.getElementById("modalErrorBanner").classList.add("hidden");
+        lucide.createIcons();
+
+        const isEdit = !!projectId;
+
+        // 1. Gather Project Payload
+        const payload = {
+          name: document.getElementById("p_name").value,
+          project_type: document.getElementById("p_type").value,
+          manager: document.getElementById("p_manager").value,
+          client: document.getElementById("p_client").value || "N/A",
+          client_cost:
+            parseFloat(document.getElementById("p_client_cost").value) || 0,
+          budget: parseFloat(document.getElementById("p_budget").value) || 0,
+          cost_type: document.getElementById("p_cost_type").value,
+          start_date: document.getElementById("p_start").value || "N/A",
+          end_date: document.getElementById("p_end").value || "N/A",
+          status: document.getElementById("p_status").value,
+          progress: document.getElementById("p_progress_slider").value + "%",
+          referred_by: "N/A", // Hidden in UI to save space, but kept in payload
+          filled_by: "N/A",
+        };
+
+        // 2. Gather SRS Data
+        const srsFileInput = document.getElementById("srs_file");
+        const srsFile = srsFileInput ? srsFileInput.files[0] : null;
+        const srsTitle = document.getElementById("srs_title").value;
+        const srsVersion =
+          document.getElementById("srs_version").value || "v1.0";
+
+        const endpoint = isEdit
+          ? `/projects/update/${projectId}`
+          : `/projects/create`;
+        const method = isEdit ? "PUT" : "POST";
+
+        try {
+          // Execute Project Save
+          const response = await apiFetch(endpoint, { method, body: payload });
+          const savedProjectId = isEdit ? projectId : response.id; // API returns created object
+
+          // INSTANT STATE UPDATE (Optimistic UI)
+          if (!isEdit) {
+            state.allProjects.unshift(response);
+          } else {
+            const idx = state.allProjects.findIndex(
+              (p) => p.id === savedProjectId,
+            );
+            if (idx !== -1) state.allProjects[idx] = response;
+          }
+
+          // Execute SRS Link if provided
+          if (srsFile) {
+            btn.innerHTML =
+              '<i data-lucide="loader-2" class="w-4 h-4 mr-2 animate-spin"></i> Uploading SRS...';
+            lucide.createIcons();
+
+            const formData = new FormData();
+            formData.append("project_id", savedProjectId);
+            formData.append("project_name", payload.name);
+            formData.append(
+              "document_title",
+              srsTitle || `${payload.name} Specifications`,
+            );
+            formData.append("version", srsVersion);
+            formData.append("file", srsFile);
+
+            await apiFetch("/uploads/srs/", {
+              method: "POST",
+              body: formData,
+            }).catch((e) => console.warn("SRS Upload failed:", e));
+          }
+          showToast(
+            `Project ${isEdit ? "updated" : "initialized"} successfully`,
+            "success",
+          );
+          closeModal();
+
+          // ARCHITECTURE FIX: If we are currently viewing this project, refresh the Command Center
+          if (
+            state.activeProject &&
+            String(state.activeProject.id) === String(savedProjectId)
+          ) {
+            state.activeProject = response;
+            await openProjectDetails(savedProjectId);
+          } else {
+            renderAdminProjectsTable();
+          }
+        } catch (err) {
+          document.getElementById("modalErrorMessage").innerText = err.message;
+          document
+            .getElementById("modalErrorBanner")
+            .classList.remove("hidden");
+          document.getElementById("modalErrorBanner").classList.add("flex");
+        } finally {
+          btn.innerHTML = originalText;
+          btn.disabled = false;
+          lucide.createIcons();
+        }
+      }
+
+      function confirmDeleteProject(id) {
+        const formHtml = `
+                <div class="text-center pb-4">
+                    <div class="w-16 h-16 bg-rose-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                        <i data-lucide="alert-triangle" class="w-8 h-8 text-brand-alert"></i>
+                    </div>
+                    <h3 class="text-xl font-bold text-slate-900 mb-2">Delete Project?</h3>
+                    <p class="text-sm text-slate-500 mb-6 px-4">Are you sure you want to permanently delete this project? This will orphan all associated timesheets and tasks.</p>
+                    <div class="flex space-x-3 px-8">
+                        <button onclick="closeModal()" class="flex-1 py-2.5 px-4 bg-white border border-slate-300 text-slate-700 rounded-lg font-medium hover:bg-slate-50 transition-colors">Cancel</button>
+                        <button onclick="executeDeleteProject('${id}')" id="btnConfirmDelete" class="flex-1 py-2.5 px-4 bg-brand-alert hover:bg-rose-700 text-white rounded-lg font-medium transition-colors flex justify-center items-center">
+                            Delete
+                        </button>
+                    </div>
+                </div>
+            `;
+        openModal("Confirm Deletion", formHtml);
+      }
+
+      async function executeDeleteProject(id) {
+        const btn = document.getElementById("btnConfirmDelete");
+        btn.innerHTML =
+          '<i data-lucide="loader-2" class="w-5 h-5 animate-spin"></i>';
+        btn.disabled = true;
+        lucide.createIcons();
+
+        try {
+          await apiFetch(`/projects/delete/${id}`, { method: "DELETE" });
+          showToast("Project deleted successfully", "success");
+          closeModal();
+          state.allProjects = state.allProjects.filter((p) => p.id !== id);
+          renderAdminProjectsTable();
+        } catch (err) {
+          showToast(err.message, "error");
+        } finally {
+          if (btn) {
+            btn.innerHTML = "Delete";
+            btn.disabled = false;
+          }
+        }
+      }
+
+      function confirmDeleteEmployee(id) {
+        const formHtml = `
+                <div class="text-center pb-4">
+                    <div class="w-16 h-16 bg-rose-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                        <i data-lucide="alert-triangle" class="w-8 h-8 text-brand-alert"></i>
+                    </div>
+                    <h3 class="text-xl font-bold text-slate-900 mb-2">Delete Employee?</h3>
+                    <p class="text-sm text-slate-500 mb-6 px-4">Are you sure you want to permanently delete this employee? This action cannot be undone.</p>
+                    <div class="flex space-x-3 px-8">
+                        <button onclick="closeModal()" class="flex-1 py-2.5 px-4 bg-white border border-slate-300 text-slate-700 rounded-lg font-medium hover:bg-slate-50 transition-colors">Cancel</button>
+                        <button onclick="executeDeleteEmployee('${id}')" id="btnConfirmEmpDelete" class="flex-1 py-2.5 px-4 bg-brand-alert hover:bg-rose-700 text-white rounded-lg font-medium transition-colors flex justify-center items-center">
+                            Delete
+                        </button>
+                    </div>
+                </div>
+            `;
+        openModal("Confirm Deletion", formHtml);
+      }
+
+      async function executeDeleteEmployee(id) {
+        const btn = document.getElementById("btnConfirmEmpDelete");
+        btn.innerHTML =
+          '<i data-lucide="loader-2" class="w-5 h-5 animate-spin"></i>';
+        btn.disabled = true;
+        lucide.createIcons();
+
+        try {
+          // Adjust endpoint based on your API design (assuming it's similar to projects)
+          await apiFetch(`/employees/delete/${id}`, { method: "DELETE" });
+          showToast("Employee deleted successfully", "success");
+          closeModal();
+          state.allEmployees = state.allEmployees.filter((e) => e.id !== id);
+          routeApp("workforce", "employees"); // Re-render workforce view
+        } catch (err) {
+          showToast(err.message, "error");
+        } finally {
+          if (btn) {
+            btn.innerHTML = "Delete";
+            btn.disabled = false;
+          }
+        }
+      }
+
+      async function toggleEmployeeStatusFromPage(empId) {
+        const emp = state.allEmployees.find((e) => e.id === empId);
+        if (!emp) return;
+        const nextStatus = !emp.is_active;
+
+        try {
+          await apiFetch(`/employees/update/${empId}`, {
+            method: "PUT",
+            body: { is_active: nextStatus },
+          });
+          showToast(
+            `Employee account ${nextStatus ? "enabled" : "disabled"} successfully.`,
+            "success",
+          );
+          await loadAdminWorkspaceData();
+          if (state.activeEmployee && state.activeEmployee.id === empId) {
+            state.activeEmployee = state.allEmployees.find(
+              (e) => e.id === empId,
+            );
+          }
+          renderAdminApp();
+        } catch (err) {
+          showToast("Failed to toggle status: " + err.message, "error");
+        }
+      }
+
+      function openEmployeeDetails(empId) {
+        // Fix: Use non-strict equality to handle both string and numeric IDs from different sources
+        state.activeEmployee = state.allEmployees.find((e) => e.id == empId);
+        state.activeEmployeeTab = "overview";
+        state.activeEmployeeAnalytics = null; // Reset analytics for new view
+        state.activeEmployeeProjects = null; // Reset projects for new view
+        state.isEditingEmployee = false;
+        renderAdminApp();
+      }
+
+      function closeEmployeeDetails() {
+        state.activeEmployee = null;
+        state.isEditingEmployee = false;
+        renderAdminApp();
+      }
+
+      async function switchEmployeeTab(activeTab) {
+        state.activeEmployeeTab = activeTab;
+
+        // Immediate UI update for tab active state
+        renderAdminApp();
+
+        if (activeTab === "analytics" && state.activeEmployee) {
+          // Fetch fresh analytics
+          try {
+            // Show "Synchronizing" loader by clearing previous data
+            state.activeEmployeeAnalytics = null;
+            renderAdminApp();
+
+            const analytics = await apiFetch(
+              `/dashboard/employee-analytics/${state.activeEmployee.id}`,
+            );
+            state.activeEmployeeAnalytics = analytics;
+            renderAdminApp();
+          } catch (err) {
+            console.error("Analytics Load Error:", err);
+            showToast("Failed to load analytics performance data.", "error");
+          }
+        }
+
+        if (activeTab === "projects" && state.activeEmployee) {
+          try {
+            state.activeEmployeeProjects = null;
+            renderAdminApp();
+            const projects = await apiFetch(
+              `/projects/employee/${state.activeEmployee.id}`,
+            );
+            state.activeEmployeeProjects = Array.isArray(projects)
+              ? projects
+              : [];
+            renderAdminApp();
+          } catch (err) {
+            console.error("Employee Projects Load Error:", err);
+          }
+        }
+      }
+
+      function toggleEmployeeEditMode(isEditing) {
+        state.isEditingEmployee = isEditing;
+        renderAdminApp();
+      }
+
+      async function uploadEmployeeImage(empId, type, subType, inputId) {
+        const fileInput = document.getElementById(inputId);
+        if (!fileInput.files || fileInput.files.length === 0) return;
+
+        const file = fileInput.files[0];
+        const formData = new FormData();
+        formData.append("file", file);
+
+        try {
+          const url = `/uploads/image/?image_type=${type}&sub_type=${subType}&employee_id=${empId}`;
+          const result = await apiFetch(url, {
+            method: "POST",
+            body: formData,
+            headers: {}, // Let browser set boundary for FormData
+          });
+
+          showToast(
+            `${type.toUpperCase()} ${subType} uploaded successfully.`,
+            "success",
+          );
+          await loadAdminWorkspaceData();
+          if (state.activeEmployee && state.activeEmployee.id === empId) {
+            state.activeEmployee = state.allEmployees.find(
+              (e) => e.id === empId,
+            );
+          }
+          renderAdminApp();
+        } catch (err) {
+          showToast("Upload failed: " + err.message, "error");
+        }
+      }
+
+      async function uploadEmployeeFile(empId, type, inputId) {
+        const fileInput = document.getElementById(inputId);
+        if (!fileInput.files || fileInput.files.length === 0) return;
+
+        const file = fileInput.files[0];
+        const formData = new FormData();
+        formData.append("file", file);
+
+        try {
+          // For files like resume, we might need a slightly different endpoint if it's not strictly an 'image'
+          // But for now let's check if the backend /uploads/image handles it or if there's /uploads/file
+          // Actually I'll use a placeholder or check if I should add /uploads/file
+          const url = `/uploads/image/?image_type=${type}&sub_type=${type}&employee_id=${empId}`;
+          await apiFetch(url, {
+            method: "POST",
+            body: formData,
+            headers: {},
+          });
+
+          showToast(`${type.toUpperCase()} uploaded successfully.`, "success");
+          await loadAdminWorkspaceData();
+          if (state.activeEmployee && state.activeEmployee.id === empId) {
+            state.activeEmployee = state.allEmployees.find(
+              (e) => e.id === empId,
+            );
+          }
+          renderAdminApp();
+        } catch (err) {
+          showToast("Upload failed: " + err.message, "error");
+        }
+      }
+
+      async function saveEmployeeEdits() {
+        const empId = state.activeEmployee.id;
+        const btn = document.getElementById("btnEmployeeSave");
+        if (!btn) return;
+        const originalHtml = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = `<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Saving...`;
+        lucide.createIcons();
+
+        const payload = {
+          full_name: document.getElementById("v_full_name").value,
+          role_id: document.getElementById("v_role_select").value,
+          salary: parseFloat(document.getElementById("v_salary").value) || 0,
+          hourly_billing_rate:
+            parseFloat(document.getElementById("v_billing_rate").value) || 0,
+        };
+
+        const textFields = [
+          "fathers_name",
+          "dob",
+          "gender",
+          "doj",
+          "manager",
+          "exp",
+          "prev",
+          "qualification",
+          "specialization",
+          "email",
+          "alt_email",
+          "phone",
+          "alt_phone",
+          "emergency",
+          "emergency_rel",
+          "ref",
+          "address",
+          "bank_name",
+          "bank_account",
+          "ifsc_code",
+          "upi_id",
+          "pan_number",
+          "adhar_number",
+        ];
+        textFields.forEach((field) => {
+          const el = document.getElementById(`v_${field}`);
+          if (el) {
+            const mappedKey =
+              field === "manager"
+                ? "reporting_manager"
+                : field === "exp"
+                  ? "experience"
+                  : field === "prev"
+                    ? "previous_employer"
+                    : field === "dob"
+                      ? "date_of_birth"
+                      : field === "doj"
+                        ? "date_of_joining"
+                        : field === "qualification"
+                          ? "highest_qualification"
+                          : field === "alt_email"
+                            ? "alternate_email"
+                            : field === "phone"
+                              ? "contact_number"
+                              : field === "alt_phone"
+                                ? "alternate_contact"
+                                : field === "emergency"
+                                  ? "emergency_contact"
+                                  : field === "emergency_rel"
+                                    ? "relationship_with_emergency_contact"
+                                    : field === "ref"
+                                      ? "reference_name"
+                                      : field;
+            payload[mappedKey] = el.value || "N/A";
+          }
+        });
+
+        try {
+          const updated = await apiFetch(`/employees/update/${empId}`, {
+            method: "PUT",
+            body: payload,
+          });
+
+          showToast("Profile updated successfully", "success");
+          await loadAdminWorkspaceData();
+          state.activeEmployee = state.allEmployees.find((e) => e.id === empId);
+          state.isEditingEmployee = false;
+          renderAdminApp();
+        } catch (err) {
+          showToast("Failed to update: " + err.message, "error");
+        } finally {
+          btn.disabled = false;
+          btn.innerHTML = originalHtml;
+          lucide.createIcons();
+        }
+      }
+
+      // --- Employee Command Center Template ---
+      function getEmployeeDetailsTemplate() {
+        const emp = state.activeEmployee;
+        if (!emp) return "";
+
+        const activeTab = state.activeEmployeeTab || "overview";
+
+        const tabs = [
+          { id: "overview", icon: "user", label: "Overview" },
+          { id: "contact", icon: "mail", label: "Contact & Personal" },
+          { id: "financials", icon: "dollar-sign", label: "Financials & Docs" },
+          { id: "projects", icon: "folder-kanban", label: "Assigned Projects" },
+          {
+            id: "analytics",
+            icon: "bar-chart-3",
+            label: "Performance Analytics",
+          },
+        ];
+
+        const tabsHtml = tabs
+          .map(
+            (t) => `
+                <button onclick="switchEmployeeTab('${t.id}')" class="px-4 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap flex items-center gap-2 ${state.activeEmployeeTab === t.id ? "border-brand-primary text-brand-primary" : "border-transparent text-slate-500 hover:text-slate-800 hover:border-slate-300"}">
+                    <i data-lucide="${t.icon}" class="w-4 h-4"></i> ${t.label}
+                </button>
+            `,
+          )
+          .join("");
+
+        const contentHtml = `
+                <div id="employee-tab-overview" class="${activeTab === "overview" ? "" : "hidden"}">
+                    ${getEmployeeOverviewTab(emp)}
+                </div>
+                <div id="employee-tab-contact" class="${activeTab === "contact" ? "" : "hidden"}">
+                    ${getEmployeeContactTab(emp)}
+                </div>
+                <div id="employee-tab-financials" class="${activeTab === "financials" ? "" : "hidden"}">
+                    ${getEmployeeFinancialsTab(emp)}
+                </div>
+                <div id="employee-tab-projects" class="${activeTab === "projects" ? "" : "hidden"}">
+                    ${getEmployeeProjectsTab(emp)}
+                </div>
+                <div id="employee-tab-analytics" class="${activeTab === "analytics" ? "" : "hidden"}">
+                    ${getEmployeeAnalyticsTab(emp)}
+                </div>
+            `;
+
+        const roleObj = state.allRoles.find((r) => r.id === emp.role_id);
+        const dept = roleObj
+          ? roleObj.department_name
+          : emp.department || "General";
+        const title = roleObj ? roleObj.role_name : emp.job_title || "Employee";
+
+        return `
+                <div class="mb-8 p-1 bg-white/50 backdrop-blur-md rounded-3xl border border-white shadow-xl">
+                    <div class="p-6 flex flex-col lg:flex-row lg:items-center justify-between gap-6">
+                        <div class="flex items-center gap-6">
+                            <button onclick="closeEmployeeDetails()" class="w-12 h-12 bg-white border border-slate-100 rounded-2xl flex items-center justify-center hover:bg-slate-50 transition-all shadow-sm group">
+                                <i data-lucide="arrow-left" class="w-5 h-5 text-slate-400 group-hover:text-brand-primary transition-colors"></i>
+                            </button>
+                            
+                            <div class="relative group">
+                                <div class="h-20 w-20 rounded-3xl overflow-hidden border-4 border-white shadow-2xl bg-slate-200 flex items-center justify-center font-black text-slate-400 text-2xl">
+                                    ${
+                                      emp.photo && emp.photo !== "N/A"
+                                        ? `<img src="${emp.photo.startsWith("http") ? emp.photo : CONFIG.API_BASE_URL + "/" + emp.photo.replace(/\\/g, "/")}" class="w-full h-full object-cover">`
+                                        : (emp.full_name || "U")
+                                            .split(" ")
+                                            .map((n) => n[0])
+                                            .join("")
+                                            .substring(0, 2)
+                                            .toUpperCase()
+                                    }
+                                </div>
+                                ${
+                                  state.isEditingEmployee
+                                    ? `
+                                    <div class="absolute -bottom-2 -right-2">
+                                        <button onclick="document.getElementById('up_profile_${emp.id}').click()" class="w-8 h-8 bg-brand-primary text-white rounded-xl shadow-lg flex items-center justify-center hover:scale-110 active:scale-95 transition-all">
+                                            <i data-lucide="camera" class="w-4 h-4"></i>
+                                        </button>
+                                        <input type="file" id="up_profile_${emp.id}" class="hidden" accept="image/*" onchange="uploadEmployeeImage('${emp.id}', 'profile', 'profile', this.id)">
+                                    </div>
+                                `
+                                    : ""
+                                }
+                            </div>
+
+                            <div>
+                                <div class="flex items-center gap-3">
+                                    <h2 class="text-3xl font-black text-slate-900 tracking-tight">${emp.full_name}</h2>
+                                    <div class="px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest ${emp.is_active !== false ? "bg-emerald-50 text-emerald-600 border border-emerald-100" : "bg-rose-50 text-rose-600 border border-rose-100"}">
+                                        ${emp.is_active !== false ? "• Online System" : "• Restricted Access"}
+                                    </div>
+                                </div>
+                                <div class="flex items-center gap-4 mt-2">
+                                    <p class="text-sm font-bold text-brand-primary bg-indigo-50 px-2 py-0.5 rounded">${title}</p>
+                                    <div class="h-1 w-1 bg-slate-300 rounded-full"></div>
+                                    <p class="text-sm font-medium text-slate-500">${dept}</p>
+                                    <div class="h-1 w-1 bg-slate-300 rounded-full"></div>
+                                    <p class="text-sm font-mono text-slate-400">@${emp.username}</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="flex items-center gap-4 bg-slate-50/50 p-2 rounded-2xl border border-slate-100">
+                            ${state.user && state.user.access_level === 'SystemAdmin' ? `
+                            <button onclick="deleteEmployeeAccount('${emp.id}', '${emp.full_name}')" class="px-5 py-2.5 bg-rose-50 text-rose-600 text-sm font-bold rounded-xl shadow-sm hover:bg-rose-100 active:scale-95 transition-all flex items-center gap-2" title="Delete Operative">
+                                <i data-lucide="trash-2" class="w-4 h-4"></i> 
+                            </button>
+                            <div class="w-px h-8 bg-slate-200 mx-1"></div>
+                            ` : ''}
+                            <button onclick="toggleEmployeeStatusFromPage('${emp.id}')" class="px-5 py-2.5 bg-white border border-slate-200 text-slate-700 text-sm font-bold rounded-xl shadow-sm hover:bg-slate-50 active:scale-95 transition-all flex items-center gap-2">
+                                <i data-lucide="power" class="w-4 h-4 ${emp.is_active !== false ? "text-rose-500" : "text-emerald-500"}"></i> 
+                                ${emp.is_active !== false ? "Deactivate" : "Activate Account"}
+                            </button>
+                            <div class="w-px h-8 bg-slate-200 mx-1"></div>
+                            <button id="btnEmployeeEdit" onclick="toggleEmployeeEditMode(true)" class="${state.isEditingEmployee ? "hidden" : "flex"} px-6 py-2.5 bg-brand-primary text-white text-sm font-bold rounded-xl shadow-lg shadow-indigo-200 hover:bg-indigo-700 active:scale-95 transition-all items-center gap-2">
+                                <i data-lucide="edit-3" class="w-4 h-4"></i> Modify Profile
+                            </button>
+                            <button id="btnEmployeeSave" onclick="saveEmployeeEdits()" class="${state.isEditingEmployee ? "flex" : "hidden"} px-6 py-2.5 bg-emerald-600 text-white text-sm font-bold rounded-xl shadow-lg shadow-emerald-200 hover:bg-emerald-700 active:scale-95 transition-all items-center gap-2">
+                                <i data-lucide="save" class="w-4 h-4"></i> Push Changes
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="bg-white rounded-[2.5rem] shadow-2xl shadow-slate-200/50 border border-slate-100 overflow-hidden flex flex-col min-h-[700px]">
+                    <div class="px-8 border-b border-slate-100 bg-white flex space-x-2 overflow-x-auto">
+                        ${tabsHtml}
+                    </div>
+                    <div class="p-10 flex-1 bg-white">
+                        ${contentHtml}
+                    </div>
+                </div>
+            `;
+      }
+
+      function getEmployeeOverviewTab(emp) {
+        const isEdit = state.isEditingEmployee;
+        const inputClass = isEdit
+          ? "w-full bg-white border border-slate-200 rounded-xl px-4 py-2.5 text-sm font-medium outline-none focus:ring-2 focus:ring-brand-primary/20 focus:border-brand-primary transition-all shadow-sm"
+          : "w-full bg-transparent border-none px-0 py-1 text-base font-bold text-slate-900 outline-none";
+
+        const roleOptions = state.allRoles
+          .map(
+            (r) =>
+              `<option value="${r.id}" ${emp.role_id === r.id ? "selected" : ""}>${r.role_name} (${r.department_name})</option>`,
+          )
+          .join("");
+
+        return `
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-10 animate-in fade-in slide-in-from-bottom-4 duration-500">
+                    <div class="lg:col-span-2 space-y-10">
+                        <div>
+                            <div class="flex items-center gap-2 mb-8">
+                                <div class="w-8 h-8 rounded-lg bg-indigo-50 text-brand-primary flex items-center justify-center">
+                                    <i data-lucide="briefcase" class="w-4 h-4"></i>
+                                </div>
+                                <h3 class="text-sm font-black text-slate-900 uppercase tracking-widest">Professional Identity</h3>
+                            </div>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+                                <div class="md:col-span-2 bg-slate-50/50 p-6 rounded-2xl border border-slate-100">
+                                    <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Legal Registered Name</p>
+                                    <input type="text" id="v_full_name" value="${emp.full_name !== "N/A" ? emp.full_name : ""}" ${isEdit ? "" : "readonly"} class="${inputClass} ${!isEdit ? "text-2xl" : ""}">
+                                </div>
+                                <div class="p-2">
+                                    <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Primary Designation</p>
+                                    ${
+                                      isEdit
+                                        ? `
+                                        <select id="v_role_select" class="${inputClass}">
+                                            <option value="">Select Corporate Role</option>
+                                            ${roleOptions}
+                                        </select>
+                                    `
+                                        : `
+                                        <p class="text-base font-bold text-slate-800">${state.allRoles.find((r) => r.id === emp.role_id)?.role_name || "N/A"}</p>
+                                        <input type="hidden" id="v_role_select" value="${emp.role_id || ""}">
+                                    `
+                                    }
+                                </div>
+                                <div class="p-2">
+                                    <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Direct Supervisor</p>
+                                    <input type="text" id="v_manager" value="${emp.reporting_manager !== "N/A" ? emp.reporting_manager : ""}" ${isEdit ? "" : "readonly"} class="${inputClass}" placeholder="Assigned Manager">
+                                </div>
+                                <div class="p-2">
+                                    <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Onboarding Date</p>
+                                    <input type="date" id="v_doj" value="${emp.date_of_joining && emp.date_of_joining !== "N/A" ? emp.date_of_joining : ""}" ${isEdit ? "" : "readonly"} class="${inputClass}">
+                                </div>
+                                <div class="p-2">
+                                    <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Professional Tenure</p>
+                                    <input type="text" id="v_exp" value="${emp.experience !== "N/A" ? emp.experience : ""}" ${isEdit ? "" : "readonly"} class="${inputClass}" placeholder="Total Experience">
+                                </div>
+                            </div>
+                        </div>
+
+                        <div>
+                            <div class="flex items-center gap-2 mb-8 pt-10 border-t border-slate-100">
+                                <div class="w-8 h-8 rounded-lg bg-emerald-50 text-brand-accent flex items-center justify-center">
+                                    <i data-lucide="graduation-cap" class="w-4 h-4"></i>
+                                </div>
+                                <h3 class="text-sm font-black text-slate-900 uppercase tracking-widest">Academic Credentials</h3>
+                            </div>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+                                <div class="md:col-span-2 p-2">
+                                    <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Paternal / Guardian Reference</p>
+                                    <input type="text" id="v_fathers_name" value="${emp.fathers_name !== "N/A" ? emp.fathers_name : ""}" ${isEdit ? "" : "readonly"} class="${inputClass}">
+                                </div>
+                                <div class="p-2">
+                                    <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Certification / Degree</p>
+                                    <input type="text" id="v_qualification" value="${emp.highest_qualification !== "N/A" ? emp.highest_qualification : ""}" ${isEdit ? "" : "readonly"} class="${inputClass}">
+                                </div>
+                                <div class="p-2">
+                                    <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Major / Specialization</p>
+                                    <input type="text" id="v_specialization" value="${emp.specialization !== "N/A" ? emp.specialization : ""}" ${isEdit ? "" : "readonly"} class="${inputClass}">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="space-y-8">
+                        <div class="bg-slate-900 text-white rounded-[2rem] p-8 shadow-2xl relative overflow-hidden group">
+                            <div class="absolute -right-4 -top-10 w-40 h-40 bg-brand-primary rounded-full opacity-20 blur-3xl group-hover:scale-150 transition-transform duration-1000"></div>
+                            <div class="flex items-center gap-3 mb-8">
+                                <div class="w-10 h-10 rounded-xl bg-white/10 text-brand-accent flex items-center justify-center">
+                                    <i data-lucide="shield-check" class="w-5 h-5"></i>
+                                </div>
+                                <h3 class="text-xs font-black text-slate-400 uppercase tracking-widest">System Metadata</h3>
+                            </div>
+                            <div class="space-y-6">
+                                <div>
+                                    <p class="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">Global System ID</p>
+                                    <p class="text-sm font-mono text-indigo-300 truncate">${emp.id}</p>
+                                </div>
+                                <div>
+                                    <p class="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">Account Creation</p>
+                                    <p class="text-sm font-bold text-white">${emp.created_at ? new Date(emp.created_at).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" }) : "N/A"}</p>
+                                </div>
+                                <div class="pt-6 border-t border-white/10">
+                                    <div class="flex items-center justify-between mb-2">
+                                        <p class="text-[10px] font-black text-slate-500 uppercase tracking-widest">Profile Completion</p>
+                                        <p class="text-xs font-black text-brand-accent">85%</p>
+                                    </div>
+                                    <div class="h-1.5 w-full bg-white/5 rounded-full overflow-hidden">
+                                        <div class="h-full bg-brand-accent rounded-full" style="width: 85%"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="bg-indigo-50 border border-indigo-100 rounded-[2rem] p-8">
+                            <h4 class="text-xs font-black text-indigo-900 uppercase tracking-widest mb-6">Internal Remarks</h4>
+                            <p class="text-sm text-indigo-700 leading-relaxed italic">
+                                "${emp.additional_info && emp.additional_info !== "N/A" ? emp.additional_info : "No administrative remarks recorded for this operative."}"
+                            </p>
+                        </div>
+                    </div>
+                </div>
+            `;
+      }
+
+      function getEmployeeContactTab(emp) {
+        const isEdit = state.isEditingEmployee;
+        const inputClass = isEdit
+          ? "w-full bg-white border border-slate-200 rounded-xl px-4 py-2.5 text-sm font-medium outline-none focus:ring-2 focus:ring-brand-primary/20 focus:border-brand-primary transition-all shadow-sm"
+          : "w-full bg-transparent border-none px-0 py-1 text-base font-bold text-slate-900 outline-none";
+
+        return `
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-12 animate-in fade-in slide-in-from-bottom-4 duration-500">
+                    <div>
+                        <div class="flex items-center gap-2 mb-8">
+                            <div class="w-8 h-8 rounded-lg bg-indigo-50 text-brand-primary flex items-center justify-center">
+                                <i data-lucide="mail" class="w-4 h-4"></i>
+                            </div>
+                            <h3 class="text-sm font-black text-slate-900 uppercase tracking-widest">Digital Connectivity</h3>
+                        </div>
+                        <div class="space-y-8 bg-white p-8 rounded-[2rem] border border-slate-100 shadow-sm">
+                            <div class="p-2">
+                                <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Corporate Email Alias</p>
+                                <input type="email" id="v_email" value="${emp.email !== "N/A" ? emp.email : ""}" ${isEdit ? "" : "readonly"} class="${inputClass}">
+                            </div>
+                            <div class="p-2">
+                                <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Secondary Personal Email</p>
+                                <input type="email" id="v_alt_email" value="${emp.alternate_email !== "N/A" ? emp.alternate_email : ""}" ${isEdit ? "" : "readonly"} class="${inputClass}">
+                            </div>
+                            <div class="grid grid-cols-2 gap-8">
+                                <div class="p-2">
+                                    <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Primary Phone</p>
+                                    <input type="text" id="v_phone" value="${emp.contact_number !== "N/A" ? emp.contact_number : ""}" ${isEdit ? "" : "readonly"} class="${inputClass}">
+                                </div>
+                                <div class="p-2">
+                                    <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Secondary Contact</p>
+                                    <input type="text" id="v_alt_phone" value="${emp.alternate_contact !== "N/A" ? emp.alternate_contact : ""}" ${isEdit ? "" : "readonly"} class="${inputClass}">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div>
+                        <div class="flex items-center gap-2 mb-8">
+                            <div class="w-8 h-8 rounded-lg bg-rose-50 text-rose-500 flex items-center justify-center">
+                                <i data-lucide="heart-pulse" class="w-4 h-4"></i>
+                            </div>
+                            <h3 class="text-sm font-black text-slate-900 uppercase tracking-widest">Emergency & Residency</h3>
+                        </div>
+                        <div class="space-y-8 bg-white p-8 rounded-[2rem] border border-slate-100 shadow-sm">
+                            <div class="grid grid-cols-2 gap-8">
+                                <div class="p-2">
+                                    <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Emergency Liaison</p>
+                                    <input type="text" id="v_emergency" value="${emp.emergency_contact !== "N/A" ? emp.emergency_contact : ""}" ${isEdit ? "" : "readonly"} class="${inputClass}">
+                                </div>
+                                <div class="p-2">
+                                    <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Relationship</p>
+                                    <input type="text" id="v_emergency_rel" value="${emp.relationship_with_emergency_contact !== "N/A" ? emp.relationship_with_emergency_contact : ""}" ${isEdit ? "" : "readonly"} class="${inputClass}">
+                                </div>
+                            </div>
+                            <div class="p-2">
+                                <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Current Residential Address</p>
+                                <textarea id="v_address" ${isEdit ? "" : "readonly"} class="${inputClass} min-h-[100px] resize-none">${emp.address !== "N/A" ? emp.address : ""}</textarea>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+      }
+
+      function getEmployeeFinancialsTab(emp) {
+        const isEdit = state.isEditingEmployee;
+        const inputClass = isEdit
+          ? "w-full bg-white border border-slate-200 rounded-xl px-4 py-2.5 text-sm font-medium outline-none focus:ring-2 focus:ring-brand-primary/20 focus:border-brand-primary transition-all shadow-sm"
+          : "w-full bg-transparent border-none px-0 py-1 text-base font-bold text-slate-900 outline-none";
+
+        return `
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-12 animate-in fade-in slide-in-from-bottom-4 duration-500">
+                    <div>
+                        <div class="flex items-center gap-2 mb-8">
+                            <div class="w-8 h-8 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center">
+                                <i data-lucide="banknote" class="w-4 h-4"></i>
+                            </div>
+                            <h3 class="text-sm font-black text-slate-900 uppercase tracking-widest">Payroll & Compensation</h3>
+                        </div>
+                        <div class="bg-white border border-slate-100 rounded-[2rem] p-10 shadow-sm space-y-10">
+                            <div>
+                                <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Monthly Gross Remuneration</p>
+                                <div class="flex items-center text-4xl font-black text-slate-900">
+                                    <span class="mr-3 text-slate-200">₹</span>
+                                    <input type="number" id="v_salary" value="${emp.salary || 0}" ${isEdit ? "" : "readonly"} class="${inputClass} ${!isEdit ? "text-4xl" : ""}">
+                                </div>
+                            </div>
+                            <div class="grid grid-cols-2 gap-10 pt-10 border-t border-slate-50">
+                                <div>
+                                    <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Effective Hourly Cost</p>
+                                    <div class="flex items-center text-lg font-bold text-slate-500">
+                                        <span class="mr-2 opacity-50">₹</span>
+                                        <input type="number" id="v_cost_rate" value="${emp.hourly_cost_rate || 0}" readonly class="w-full bg-transparent border-none p-0 outline-none cursor-not-allowed">
+                                    </div>
+                                </div>
+                                <div>
+                                    <p class="text-[10px] font-black text-brand-primary uppercase tracking-widest mb-2">Standard Billing Rate</p>
+                                    <div class="flex items-center text-lg font-bold text-brand-primary">
+                                        <span class="mr-2 opacity-50">₹</span>
+                                        <input type="number" id="v_billing_rate" value="${emp.hourly_billing_rate || 0}" ${isEdit ? "" : "readonly"} class="${inputClass.replace("text-slate-900", "text-brand-primary")} font-bold">
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="mt-12">
+                            <div class="flex items-center gap-2 mb-8">
+                                <div class="w-8 h-8 rounded-lg bg-slate-900 text-white flex items-center justify-center">
+                                    <i data-lucide="credit-card" class="w-4 h-4"></i>
+                                </div>
+                                <h3 class="text-sm font-black text-slate-900 uppercase tracking-widest">Settlement Repository</h3>
+                            </div>
+                            <div class="bg-slate-950 text-white rounded-[2rem] p-10 shadow-2xl relative overflow-hidden group">
+                                <div class="absolute right-0 top-0 w-48 h-48 bg-brand-primary/10 rounded-full blur-3xl -translate-y-1/2 translate-x-1/2 group-hover:scale-125 transition-transform duration-1000"></div>
+                                <div class="space-y-8 relative">
+                                    <div>
+                                        <p class="text-[10px] font-black text-slate-600 uppercase tracking-widest mb-2">Financial Institution</p>
+                                        <input type="text" id="v_bank_name" value="${emp.bank_name !== "N/A" ? emp.bank_name : ""}" ${isEdit ? "" : "readonly"} class="w-full bg-transparent border-none p-0 text-2xl font-black text-white outline-none focus:ring-0 placeholder:text-slate-800" placeholder="Bank Name">
+                                    </div>
+                                    <div class="grid grid-cols-2 gap-10">
+                                        <div>
+                                            <p class="text-[10px] font-black text-slate-600 uppercase tracking-widest mb-2">Account Registry</p>
+                                            <input type="text" id="v_bank_account" value="${emp.bank_account !== "N/A" ? emp.bank_account : ""}" ${isEdit ? "" : "readonly"} class="w-full bg-transparent border-none p-0 text-lg font-mono tracking-widest text-white outline-none focus:ring-0 placeholder:text-slate-800" placeholder="0000 0000 0000">
+                                        </div>
+                                        <div>
+                                            <p class="text-[10px] font-black text-slate-600 uppercase tracking-widest mb-2">Transit Routing (IFSC)</p>
+                                            <input type="text" id="v_ifsc_code" value="${emp.ifsc_code !== "N/A" ? emp.ifsc_code : ""}" ${isEdit ? "" : "readonly"} class="w-full bg-transparent border-none p-0 text-lg font-mono text-white outline-none focus:ring-0 placeholder:text-slate-800" placeholder="BANK0000123">
+                                        </div>
+                                    </div>
+                                    <div class="pt-8 border-t border-white/5 flex items-center justify-between">
+                                        <div class="flex-1">
+                                            <p class="text-[10px] font-black text-slate-600 uppercase tracking-widest mb-2">UPI Identifier</p>
+                                            <input type="text" id="v_upi_id" value="${emp.upi_id !== "N/A" ? emp.upi_id : ""}" ${isEdit ? "" : "readonly"} class="w-full bg-transparent border-none p-0 text-lg font-bold text-brand-accent outline-none focus:ring-0 placeholder:text-slate-800" placeholder="user@upi">
+                                        </div>
+                                        <div class="relative group/qr">
+                                            <div class="w-16 h-16 bg-white rounded-2xl p-2 overflow-hidden shadow-2xl">
+                                                ${emp.qr_code && emp.qr_code !== "N/A" ? `<img src="${emp.qr_code.startsWith("http") ? emp.qr_code : CONFIG.API_BASE_URL + "/" + emp.qr_code.replace(/\\/g, "/")}" class="w-full h-full object-contain cursor-pointer" onclick="openImageModal(this.src)">` : `<div class="w-full h-full bg-slate-50 flex items-center justify-center"><i data-lucide="qr-code" class="w-8 h-8 text-slate-200"></i></div>`}
+                                            </div>
+                                            ${
+                                              isEdit
+                                                ? `
+                                                <div class="absolute -top-3 -right-3 flex flex-col gap-1">
+                                                    <button onclick="document.getElementById('up_qr_${emp.id}').click()" class="w-8 h-8 bg-brand-primary text-white rounded-xl shadow-xl flex items-center justify-center hover:scale-110 active:scale-95 transition-all" title="Replace QR">
+                                                        <i data-lucide="upload" class="w-4 h-4"></i>
+                                                    </button>
+                                                    ${
+                                                      emp.qr_code &&
+                                                      emp.qr_code !== "N/A"
+                                                        ? `
+                                                    <button onclick="deleteEmployeeImage('${emp.id}', 'qr_code', 'none')" class="w-8 h-8 bg-rose-500 text-white rounded-xl shadow-xl flex items-center justify-center hover:scale-110 active:scale-95 transition-all" title="Delete QR">
+                                                        <i data-lucide="trash-2" class="w-4 h-4"></i>
+                                                    </button>`
+                                                        : ""
+                                                    }
+                                                    <input type="file" id="up_qr_${emp.id}" class="hidden" accept="image/*" onchange="uploadEmployeeImage('${emp.id}', 'qr_code', 'none', this.id)">
+                                                </div>
+                                            `
+                                                : ""
+                                            }
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div>
+                        <div class="flex items-center gap-2 mb-8">
+                            <div class="w-8 h-8 rounded-lg bg-amber-50 text-amber-600 flex items-center justify-center">
+                                <i data-lucide="file-check" class="w-4 h-4"></i>
+                            </div>
+                            <h3 class="text-sm font-black text-slate-900 uppercase tracking-widest">Compliance Vault</h3>
+                        </div>
+                        <div class="space-y-10">
+                            <div class="bg-white border border-slate-100 rounded-[2.5rem] p-8 shadow-sm">
+                                <div class="flex items-center justify-between mb-8">
+                                    <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest">PAN Verification</p>
+                                    <input type="text" id="v_pan_number" value="${emp.pan_number !== "N/A" ? emp.pan_number : ""}" ${isEdit ? "" : "readonly"} class="w-48 bg-slate-50 rounded-xl px-4 py-2 text-sm font-mono font-black text-slate-900 text-right outline-none focus:ring-2 focus:ring-brand-primary/20" placeholder="ABCDE1234F">
+                                </div>
+                                <div class="grid grid-cols-2 gap-8">
+                                    <div class="space-y-3 relative group">
+                                        <p class="text-[10px] text-center font-black text-slate-300 uppercase tracking-widest">Document Front</p>
+                                        <div class="h-32 w-full overflow-hidden rounded-[2rem] border border-slate-50 shadow-inner relative bg-slate-50">
+                                            ${emp.pan_front && emp.pan_front !== "N/A" ? `<img src="${emp.pan_front.startsWith("http") ? emp.pan_front : CONFIG.API_BASE_URL + "/" + emp.pan_front.replace(/\\/g, "/")}" class="w-full h-full object-cover cursor-pointer hover:scale-110 transition-transform duration-700" onclick="openImageModal(this.src)">` : `<div class="w-full h-full flex items-center justify-center text-slate-200"><i data-lucide="image" class="w-8 h-8"></i></div>`}
+                                            ${
+                                              isEdit
+                                                ? `
+                                                <div class="absolute inset-0 bg-brand-primary/80 opacity-0 group-hover:opacity-100 flex flex-col items-center justify-center transition-all text-white">
+                                                    <button onclick="document.getElementById('up_pan_f_${emp.id}').click()" class="mb-2 p-2 hover:bg-white/20 rounded-lg transition-colors" title="Replace"><i data-lucide="upload" class="w-5 h-5"></i></button>
+                                                    ${emp.pan_front && emp.pan_front !== "N/A" ? `<button onclick="deleteEmployeeImage('${emp.id}', 'pancard', 'front')" class="p-2 hover:bg-rose-500 rounded-lg transition-colors" title="Delete"><i data-lucide="trash-2" class="w-5 h-5"></i></button>` : ""}
+                                                </div>
+                                            `
+                                                : ""
+                                            }
+                                        </div>
+                                        <input type="file" id="up_pan_f_${emp.id}" class="hidden" accept="image/*" onchange="uploadEmployeeImage('${emp.id}', 'pancard', 'front', this.id)">
+                                    </div>
+                                    <div class="space-y-3 relative group">
+                                        <p class="text-[10px] text-center font-black text-slate-300 uppercase tracking-widest">Document Reverse</p>
+                                        <div class="h-32 w-full overflow-hidden rounded-[2rem] border border-slate-50 shadow-inner relative bg-slate-50">
+                                            ${emp.pan_back && emp.pan_back !== "N/A" ? `<img src="${emp.pan_back.startsWith("http") ? emp.pan_back : CONFIG.API_BASE_URL + "/" + emp.pan_back.replace(/\\/g, "/")}" class="w-full h-full object-cover cursor-pointer hover:scale-110 transition-transform duration-700" onclick="openImageModal(this.src)">` : `<div class="w-full h-full flex items-center justify-center text-slate-200"><i data-lucide="image" class="w-8 h-8"></i></div>`}
+                                            ${
+                                              isEdit
+                                                ? `
+                                                <div class="absolute inset-0 bg-brand-primary/80 opacity-0 group-hover:opacity-100 flex flex-col items-center justify-center transition-all text-white">
+                                                    <button onclick="document.getElementById('up_pan_b_${emp.id}').click()" class="mb-2 p-2 hover:bg-white/20 rounded-lg transition-colors" title="Replace"><i data-lucide="upload" class="w-5 h-5"></i></button>
+                                                    ${emp.pan_back && emp.pan_back !== "N/A" ? `<button onclick="deleteEmployeeImage('${emp.id}', 'pancard', 'back')" class="p-2 hover:bg-rose-500 rounded-lg transition-colors" title="Delete"><i data-lucide="trash-2" class="w-5 h-5"></i></button>` : ""}
+                                                </div>
+                                            `
+                                                : ""
+                                            }
+                                        </div>
+                                        <input type="file" id="up_pan_b_${emp.id}" class="hidden" accept="image/*" onchange="uploadEmployeeImage('${emp.id}', 'pancard', 'back', this.id)">
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="bg-white border border-slate-100 rounded-[2.5rem] p-8 shadow-sm">
+                                <div class="flex items-center justify-between mb-8">
+                                    <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest">Aadhaar Authentication</p>
+                                    <input type="text" id="v_adhar_number" value="${emp.adhar_number !== "N/A" ? emp.adhar_number : ""}" ${isEdit ? "" : "readonly"} class="w-48 bg-slate-50 rounded-xl px-4 py-2 text-sm font-mono font-black text-slate-900 text-right outline-none focus:ring-2 focus:ring-brand-primary/20" placeholder="0000 0000 0000">
+                                </div>
+                                <div class="grid grid-cols-2 gap-8">
+                                    <div class="space-y-3 relative group">
+                                        <p class="text-[10px] text-center font-black text-slate-300 uppercase tracking-widest">Aadhaar Front</p>
+                                        <div class="h-32 w-full overflow-hidden rounded-[2rem] border border-slate-50 shadow-inner relative bg-slate-50">
+                                            ${emp.adhar_front && emp.adhar_front !== "N/A" ? `<img src="${emp.adhar_front.startsWith("http") ? emp.adhar_front : CONFIG.API_BASE_URL + "/" + emp.adhar_front.replace(/\\/g, "/")}" class="w-full h-full object-cover cursor-pointer hover:scale-110 transition-transform duration-700" onclick="openImageModal(this.src)">` : `<div class="w-full h-full flex items-center justify-center text-slate-200"><i data-lucide="image" class="w-8 h-8"></i></div>`}
+                                            ${
+                                              isEdit
+                                                ? `
+                                                <div class="absolute inset-0 bg-brand-primary/80 opacity-0 group-hover:opacity-100 flex flex-col items-center justify-center transition-all text-white">
+                                                    <button onclick="document.getElementById('up_adhar_f_${emp.id}').click()" class="mb-2 p-2 hover:bg-white/20 rounded-lg transition-colors" title="Replace"><i data-lucide="upload" class="w-5 h-5"></i></button>
+                                                    ${emp.adhar_front && emp.adhar_front !== "N/A" ? `<button onclick="deleteEmployeeImage('${emp.id}', 'adhar', 'front')" class="p-2 hover:bg-rose-500 rounded-lg transition-colors" title="Delete"><i data-lucide="trash-2" class="w-5 h-5"></i></button>` : ""}
+                                                </div>
+                                            `
+                                                : ""
+                                            }
+                                        </div>
+                                        <input type="file" id="up_adhar_f_${emp.id}" class="hidden" accept="image/*" onchange="uploadEmployeeImage('${emp.id}', 'adhar', 'front', this.id)">
+                                    </div>
+                                    <div class="space-y-3 relative group">
+                                        <p class="text-[10px] text-center font-black text-slate-300 uppercase tracking-widest">Aadhaar Reverse</p>
+                                        <div class="h-32 w-full overflow-hidden rounded-[2rem] border border-slate-50 shadow-inner relative bg-slate-50">
+                                            ${emp.adhar_back && emp.adhar_back !== "N/A" ? `<img src="${emp.adhar_back.startsWith("http") ? emp.adhar_back : CONFIG.API_BASE_URL + "/" + emp.adhar_back.replace(/\\/g, "/")}" class="w-full h-full object-cover cursor-pointer hover:scale-110 transition-transform duration-700" onclick="openImageModal(this.src)">` : `<div class="w-full h-full flex items-center justify-center text-slate-200"><i data-lucide="image" class="w-8 h-8"></i></div>`}
+                                            ${
+                                              isEdit
+                                                ? `
+                                                <div class="absolute inset-0 bg-brand-primary/80 opacity-0 group-hover:opacity-100 flex flex-col items-center justify-center transition-all text-white">
+                                                    <button onclick="document.getElementById('up_adhar_b_${emp.id}').click()" class="mb-2 p-2 hover:bg-white/20 rounded-lg transition-colors" title="Replace"><i data-lucide="upload" class="w-5 h-5"></i></button>
+                                                    ${emp.adhar_back && emp.adhar_back !== "N/A" ? `<button onclick="deleteEmployeeImage('${emp.id}', 'adhar', 'back')" class="p-2 hover:bg-rose-500 rounded-lg transition-colors" title="Delete"><i data-lucide="trash-2" class="w-5 h-5"></i></button>` : ""}
+                                                </div>
+                                            `
+                                                : ""
+                                            }
+                                        </div>
+                                        <input type="file" id="up_adhar_b_${emp.id}" class="hidden" accept="image/*" onchange="uploadEmployeeImage('${emp.id}', 'adhar', 'back', this.id)">
+                                    </div>
+                                </div>
+                            <div class="bg-indigo-50 border border-indigo-100 rounded-[2.5rem] p-8 flex items-center justify-between mt-8">
+                                <div class="flex items-center gap-4">
+                                    <div class="w-12 h-12 rounded-2xl bg-white flex items-center justify-center text-brand-primary shadow-sm">
+                                        <i data-lucide="file-check"></i>
+                                    </div>
+                                    <div>
+                                        <p class="text-xs font-black text-indigo-900 uppercase tracking-widest">Professional Resume</p>
+                                        <p class="text-[10px] text-indigo-500 font-bold uppercase tracking-tighter">Verified Career Document</p>
+                                    </div>
+                                </div>
+                                <div class="flex items-center gap-3">
+                                    ${emp.resume && emp.resume !== "N/A" ? `<a href="${emp.resume.startsWith("http") ? emp.resume : CONFIG.API_BASE_URL + "/" + emp.resume.replace(/\\/g, "/")}" target="_blank" class="px-5 py-2 bg-white text-brand-primary text-[10px] font-black uppercase tracking-widest rounded-xl shadow-sm hover:shadow-md transition-all border border-indigo-100">View File</a>` : ""}
+                                    ${
+                                      isEdit
+                                        ? `
+                                        <button onclick="document.getElementById('up_resume_${emp.id}').click()" class="px-5 py-2 bg-brand-primary text-white text-[10px] font-black uppercase tracking-widest rounded-xl shadow-lg shadow-indigo-200 hover:bg-indigo-700 active:scale-95 transition-all">Update</button>
+                                        <input type="file" id="up_resume_${emp.id}" class="hidden" accept=".pdf,.doc,.docx" onchange="uploadEmployeeFile('${emp.id}', 'resume', this.id)">
+                                    `
+                                        : ""
+                                    }
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                </div>
+            `;
+      }
+
+      function getEmployeeProjectsTab(emp) {
+        if (state.activeEmployeeProjects === null) {
+          return `
+                    <div class="flex flex-col items-center justify-center py-24 text-slate-400">
+                        <div class="w-16 h-16 bg-slate-50 rounded-full flex items-center justify-center mb-4 relative">
+                            <i data-lucide="folder-kanban" class="w-8 h-8 text-slate-200"></i>
+                            <div class="absolute inset-0 border-4 border-brand-primary border-t-transparent rounded-full animate-spin"></div>
+                        </div>
+                        <p class="text-sm font-bold text-slate-900">Synchronizing Projects</p>
+                        <p class="text-xs">Mapping project involvements and management roles...</p>
+                    </div>
+                `;
+        }
+
+        // Combine explicitly assigned projects from API with any projects where they are listed as manager in the global list
+        const projects = state.allProjects.filter((p) => {
+          const isAssigned = state.activeEmployeeProjects.some(
+            (ap) => String(ap.id) === String(p.id),
+          );
+          const isManager = p.manager === emp.username;
+          return isAssigned || isManager;
+        });
+
+        let projectsHtml = "";
+        if (projects.length === 0) {
+          projectsHtml =
+            '<div class="text-center py-16 text-slate-500 bg-slate-50 rounded-2xl border border-dashed border-slate-200"><div class="w-16 h-16 bg-white rounded-full shadow-sm flex items-center justify-center mx-auto mb-4"><i data-lucide="folder-x" class="w-8 h-8 text-slate-300"></i></div><p class="font-bold text-slate-900">No Projects Assigned</p><p class="text-xs mt-1">This employee is not currently assigned to any active projects.</p></div>';
+        } else {
+          projectsHtml = projects
+            .map(
+              (p) => `
+                    <div class="flex items-center justify-between p-5 bg-white border border-slate-200 rounded-2xl shadow-sm hover:border-brand-primary hover:shadow-md transition-all cursor-pointer group" onclick="routeApp('projects'); setTimeout(()=>openProjectDetails('${p.id}'), 100);">
+                        <div class="flex items-center gap-4">
+                            <div class="w-12 h-12 rounded-xl bg-slate-50 text-slate-400 flex items-center justify-center group-hover:bg-indigo-50 group-hover:text-brand-primary transition-colors">
+                                <i data-lucide="layout"></i>
+                            </div>
+                            <div>
+                                <h4 class="text-sm font-bold text-slate-900 group-hover:text-brand-primary transition-colors">${p.name}</h4>
+                                <div class="flex items-center gap-2 mt-1">
+                                    <span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-600 border border-slate-200">${p.status}</span>
+                                    ${p.manager === emp.username ? '<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-indigo-50 text-brand-primary border border-indigo-100">Managing</span>' : ""}
+                                </div>
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-3">
+                            <div class="text-right">
+                                <p class="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Progress</p>
+                                <p class="text-sm font-bold text-slate-900">${p.progress || "0%"}</p>
+                            </div>
+                            <i data-lucide="arrow-right" class="w-5 h-5 text-slate-300 group-hover:text-brand-primary group-hover:translate-x-1 transition-all"></i>
+                        </div>
+                    </div>
+                `,
+            )
+            .join("");
+        }
+
+        return `
+                <div class="space-y-8 animate-in fade-in slide-in-from-bottom-2 duration-300">
+                    <div>
+                        <div class="flex items-center justify-between mb-6">
+                            <div>
+                                <h3 class="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
+                                    <i data-lucide="folder-kanban" class="w-4 h-4 text-brand-primary"></i> Current Project Portfolio
+                                </h3>
+                                <p class="text-xs text-slate-500 mt-1">Live assignments and managed projects for this employee.</p>
+                            </div>
+                        </div>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            ${projectsHtml}
+                        </div>
+                    </div>
+                </div>
+            `;
+      }
+
+      function getEmployeeAnalyticsTab(emp) {
+        try {
+          const data = state.activeEmployeeAnalytics;
+          if (!data) {
+            return `
+                        <div class="flex flex-col items-center justify-center py-24 text-slate-400">
+                            <div class="w-20 h-20 bg-slate-50 rounded-full flex items-center justify-center mb-6 relative">
+                                <i data-lucide="bar-chart-2" class="w-10 h-10 text-slate-200"></i>
+                                <div class="absolute inset-0 border-4 border-brand-primary border-t-transparent rounded-full animate-spin"></div>
+                            </div>
+                            <p class="text-lg font-bold text-slate-900">Synchronizing Analytics</p>
+                            <p class="text-sm">Calculating performance indices and data points...</p>
+                        </div>
+                    `;
+          }
+
+          const projectEntries = Object.entries(
+            data.lifelong?.project_distribution || {},
+          );
+          const projectBadges =
+            projectEntries.length > 0
+              ? projectEntries
+                  .map(
+                    ([name, count]) => `
+                        <div class="flex items-center justify-between p-3 bg-slate-50 rounded-xl border border-slate-100">
+                            <span class="text-xs font-bold text-slate-700">${name}</span>
+                            <span class="px-2 py-0.5 rounded-full bg-white border border-slate-200 text-[10px] font-bold text-brand-primary">${count} Tasks</span>
+                        </div>
+                    `,
+                  )
+                  .join("")
+              : '<p class="text-xs text-slate-400 py-4 text-center italic">No project data available for this range.</p>';
+
+          return `
+                    <div class="space-y-8 animate-in fade-in slide-in-from-bottom-2 duration-300">
+                        <!-- Top Performance Cards -->
+                        <div class="grid grid-cols-1 md:grid-cols-4 gap-6">
+                            <div class="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm relative overflow-hidden group hover:border-brand-primary transition-all">
+                                <div class="absolute -right-4 -top-4 w-16 h-16 bg-brand-primary opacity-5 rounded-full group-hover:scale-150 transition-transform"></div>
+                                <div class="flex items-center gap-3 mb-4">
+                                    <div class="w-10 h-10 rounded-xl bg-indigo-50 text-brand-primary flex items-center justify-center">
+                                        <i data-lucide="zap"></i>
+                                    </div>
+                                    <p class="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Daily Focus</p>
+                                </div>
+                                <h3 class="text-3xl font-bold text-slate-900">${data.daily?.hours || 0} <span class="text-sm font-normal text-slate-400 tracking-normal">hrs</span></h3>
+                                <p class="text-[10px] text-slate-500 mt-1">Output: ${data.daily?.content_pieces || 0} pieces of content</p>
+                            </div>
+
+                            <div class="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm relative overflow-hidden group hover:border-brand-accent transition-all">
+                                <div class="absolute -right-4 -top-4 w-16 h-16 bg-brand-accent opacity-5 rounded-full group-hover:scale-150 transition-transform"></div>
+                                <div class="flex items-center gap-3 mb-4">
+                                    <div class="w-10 h-10 rounded-xl bg-emerald-50 text-brand-accent flex items-center justify-center">
+                                        <i data-lucide="trending-up"></i>
+                                    </div>
+                                    <p class="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Monthly Yield</p>
+                                </div>
+                                <h3 class="text-3xl font-bold text-slate-900">${data.monthly?.hours || 0} <span class="text-sm font-normal text-slate-400 tracking-normal">hrs</span></h3>
+                                <p class="text-[10px] text-brand-accent font-bold mt-1">Generated: ${formatCurrency(data.monthly?.billed || 0)}</p>
+                            </div>
+
+                            <div class="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm relative overflow-hidden group hover:border-amber-500 transition-all">
+                                <div class="absolute -right-4 -top-4 w-16 h-16 bg-amber-500 opacity-5 rounded-full group-hover:scale-150 transition-transform"></div>
+                                <div class="flex items-center gap-3 mb-4">
+                                    <div class="w-10 h-10 rounded-xl bg-amber-50 text-amber-500 flex items-center justify-center">
+                                        <i data-lucide="calendar"></i>
+                                    </div>
+                                    <p class="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Yearly Trajectory</p>
+                                </div>
+                                <h3 class="text-3xl font-bold text-slate-900">${data.yearly?.hours || 0} <span class="text-sm font-normal text-slate-400 tracking-normal">hrs</span></h3>
+                                <p class="text-[10px] text-slate-500 mt-1">Projected end-year: ${(((data.yearly?.hours || 0) / (new Date().getMonth() + 1)) * 12).toFixed(0)} hrs</p>
+                            </div>
+
+                            <div class="bg-slate-900 text-white p-6 rounded-2xl shadow-xl relative overflow-hidden group">
+                                <div class="absolute -right-6 -bottom-6 w-24 h-24 bg-brand-primary opacity-20 rounded-full blur-2xl"></div>
+                                <div class="flex items-center gap-3 mb-4">
+                                    <div class="w-10 h-10 rounded-xl bg-white/10 text-brand-accent flex items-center justify-center">
+                                        <i data-lucide="medal"></i>
+                                    </div>
+                                    <p class="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Lifelong Impact</p>
+                                </div>
+                                <h3 class="text-3xl font-bold text-white">${formatNumber((data.lifelong?.total_revenue || 0) / 100000)} <span class="text-sm font-normal text-slate-400 tracking-normal">Lakhs</span></h3>
+                                <p class="text-[10px] text-brand-accent font-bold mt-1">Total Career Revenue</p>
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                            <div class="lg:col-span-2 space-y-6">
+                                <div class="bg-white rounded-2xl border border-slate-200 p-8 shadow-sm">
+                                    <h4 class="text-sm font-bold text-slate-900 uppercase tracking-wider mb-6 flex items-center gap-2">
+                                        <i data-lucide="activity" class="w-4 h-4 text-brand-primary"></i> Productivity Analysis
+                                    </h4>
+                                    <div class="space-y-6">
+                                        <div>
+                                            <div class="flex justify-between items-end mb-2">
+                                                <p class="text-xs font-bold text-slate-500">Efficiency Ratio (ROI)</p>
+                                                <p class="text-sm font-bold text-brand-accent">${(((data.lifelong?.total_revenue || 0) / (data.lifelong?.total_cost || 1)) * 100).toFixed(1)}%</p>
+                                            </div>
+                                            <div class="h-2 w-full bg-slate-100 rounded-full overflow-hidden">
+                                                <div class="h-full bg-brand-accent rounded-full" style="width: ${Math.min(((data.lifelong?.total_revenue || 0) / (data.lifelong?.total_cost || 1)) * 20, 100)}%"></div>
+                                            </div>
+                                        </div>
+                                        
+                                        <div class="grid grid-cols-2 gap-8 pt-4 border-t border-slate-50">
+                                            <div>
+                                                <p class="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Total Hours Logged</p>
+                                                <p class="text-2xl font-bold text-slate-900">${data.lifelong?.total_hours || 0}</p>
+                                            </div>
+                                            <div>
+                                                <p class="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Lifetime Cost-to-Company</p>
+                                                <p class="text-2xl font-bold text-slate-900">${formatCurrency(data.lifelong?.total_cost || 0)}</p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="bg-indigo-900 text-white rounded-2xl p-8 shadow-xl relative overflow-hidden">
+                                    <div class="absolute right-0 top-0 w-32 h-32 bg-white opacity-5 rounded-full -translate-y-1/2 translate-x-1/2"></div>
+                                    <h4 class="text-sm font-bold text-indigo-300 uppercase tracking-wider mb-4">Strategic Insight</h4>
+                                    <p class="text-lg font-medium leading-relaxed">
+                                        This employee is generating <span class="text-brand-accent font-bold">${((data.lifelong?.total_revenue || 0) / (data.lifelong?.total_hours || 1)).toFixed(0)} INR</span> revenue per hour. 
+                                        Based on the current trajectory, they are a <span class="text-indigo-200 underline decoration-indigo-400 decoration-2 underline-offset-4">High Yield Asset</span> with a stable output consistency.
+                                    </p>
+                                </div>
+                            </div>
+
+                            <div class="bg-white rounded-2xl border border-slate-200 p-8 shadow-sm">
+                                <h4 class="text-sm font-bold text-slate-900 uppercase tracking-wider mb-6 flex items-center gap-2">
+                                    <i data-lucide="pie-chart" class="w-4 h-4 text-brand-primary"></i> Project Allocation
+                                </h4>
+                                <div class="space-y-3">
+                                    ${projectBadges}
+                                </div>
+                                <div class="mt-8 pt-6 border-t border-slate-100">
+                                    <p class="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-4">Recent Engagement Volume</p>
+                                    <div class="flex items-end gap-1 h-20">
+                                        <div class="flex-1 bg-slate-100 rounded-t-sm h-[40%]"></div>
+                                        <div class="flex-1 bg-slate-100 rounded-t-sm h-[60%]"></div>
+                                        <div class="flex-1 bg-brand-primary rounded-t-sm h-[90%]"></div>
+                                        <div class="flex-1 bg-brand-primary rounded-t-sm h-[75%]"></div>
+                                        <div class="flex-1 bg-slate-200 rounded-t-sm h-[50%]"></div>
+                                        <div class="flex-1 bg-brand-accent rounded-t-sm h-[100%]"></div>
+                                        <div class="flex-1 bg-slate-100 rounded-t-sm h-[30%]"></div>
+                                    </div>
+                                    <div class="flex justify-between mt-2 text-[8px] font-bold text-slate-400 uppercase tracking-tighter">
+                                        <span>Mon</span>
+                                        <span>Sun</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+        } catch (err) {
+          console.error("Analytics Component Error:", err);
+          return `<div class="p-12 text-center text-slate-400 bg-slate-50 rounded-2xl border border-dashed border-slate-200"><i data-lucide="alert-circle" class="mx-auto mb-4 w-12 h-12 text-slate-200"></i><p class="font-bold text-slate-900">Analytics Display Error</p><p class="text-xs">There was an issue rendering the performance metrics for this employee.</p></div>`;
+        }
+      }
+
+      function getAdminWorkforceTemplate() {
+        if (state.activeEmployee) {
+          return getEmployeeDetailsTemplate();
+        }
+
+        // Robust fallback if state gets corrupted with 'undefined' or 'null' strings
+        if (!["employees", "admins", "roles"].includes(state.workforceTab)) {
+          state.workforceTab = "employees";
+        }
+
+        let tabContent = "";
+
+        if (state.workforceTab === "employees") {
+          const getInitials = (name) =>
+            name && name !== "N/A"
+              ? name
+                  .split(" ")
+                  .map((n) => n[0])
+                  .join("")
+                  .substring(0, 2)
+                  .toUpperCase()
+              : "U";
+
+          let filteredEmployees = state.allEmployees;
+          if (state.empSearchTerm) {
+            const st = state.empSearchTerm.toLowerCase();
+            filteredEmployees = filteredEmployees.filter((e) => {
+              const roleObj = state.allRoles.find((r) => r.id === e.role_id);
+              const matchDept =
+                (roleObj ? roleObj.department_name : e.department) || "";
+              const matchRole =
+                (roleObj ? roleObj.role_name : e.job_title) || "";
+              return (
+                (e.full_name && e.full_name.toLowerCase().includes(st)) ||
+                (e.username && e.username.toLowerCase().includes(st)) ||
+                (e.email && e.email.toLowerCase().includes(st)) ||
+                matchDept.toLowerCase().includes(st) ||
+                matchRole.toLowerCase().includes(st)
+              );
+            });
+          }
+
+          const rows =
+            filteredEmployees
+              .map((e) => {
+                const roleObj = state.allRoles.find((r) => r.id === e.role_id);
+                const dept = roleObj
+                  ? roleObj.department_name
+                  : e.department && e.department !== "N/A"
+                    ? e.department
+                    : "General";
+                const title = roleObj
+                  ? roleObj.role_name
+                  : e.job_title && e.job_title !== "N/A"
+                    ? e.job_title
+                    : e.role_id
+                      ? "Assigned Role"
+                      : "Employee";
+
+                return `
+                    <tr class="hover:bg-slate-50 border-b border-slate-100 last:border-0 cursor-pointer group emp-row-item" onclick="openEmployeeDetails('${e.id}')">
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            <div class="flex items-center">
+                                <div class="h-8 w-8 rounded-full bg-slate-200 text-slate-600 flex items-center justify-center font-bold mr-3 transition-colors group-hover:bg-indigo-50 group-hover:text-brand-primary">
+                                    ${getInitials(e.full_name)}
+                                </div>
+                                <div>
+                                    <div class="font-semibold text-slate-800 flex items-center gap-2 group-hover:text-brand-primary transition-colors">
+                                        ${e.full_name !== "N/A" ? e.full_name : "Unnamed User"}
+                                        <i data-lucide="external-link" class="w-3.5 h-3.5 text-brand-primary opacity-0 group-hover:opacity-100 transition-opacity"></i>
+                                    </div>
+                                    <div class="text-xs text-slate-500">@${e.username && e.username !== "N/A" ? e.username : "no_user"}</div>
+                                </div>
+                            </div>
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            <div class="text-sm text-slate-800 font-medium">${title}</div>
+                            <div class="text-xs text-slate-500">${dept}</div>
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-slate-800">${formatCurrency(e.hourly_cost_rate)} <span class="text-xs text-slate-400 font-normal">/hr</span></td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-brand-accent">${formatCurrency(e.hourly_billing_rate)} <span class="text-xs text-slate-400 font-normal">/hr</span></td>
+                        <td class="px-6 py-4 whitespace-nowrap"><span class="px-2 py-1 text-xs font-semibold rounded-full ${e.is_active !== false ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "bg-rose-50 text-rose-700 border border-rose-200"}">${e.is_active !== false ? "Active" : "Disabled"}</span></td>
+                        <td class="px-6 py-4 whitespace-nowrap text-right">
+                            <button onclick="event.stopPropagation(); confirmDeleteEmployee('${e.id}')" class="text-slate-400 hover:text-brand-alert p-1.5 bg-white border border-slate-200 rounded shadow-sm transition-colors opacity-0 group-hover:opacity-100" title="Delete">
+                                <i data-lucide="trash-2" class="w-4 h-4"></i>
+                            </button>
+                        </td>
+                    </tr>
+                `;
+              })
+              .join("") ||
+            `<tr><td colspan="6" class="px-6 py-8 text-center text-slate-500">No employees found.</td></tr>`;
+
+          tabContent = `
+                    <table class="min-w-full divide-y divide-slate-200">
+                        <thead class="bg-slate-50">
+                            <tr>
+                                <th class="px-6 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">Employee</th>
+                                <th class="px-6 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">Job Role & Dept</th>
+                                <th class="px-6 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">Cost Rate</th>
+                                <th class="px-6 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">Billing Rate</th>
+                                <th class="px-6 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">Status</th>
+                                <th class="px-6 py-3 text-right text-xs font-bold text-slate-500 uppercase tracking-wider">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody class="bg-white divide-y divide-slate-200" id="emp_tbody">
+                            ${rows}
+                        </tbody>
+                    </table>
+                `;
+        } else if (state.workforceTab === "admins") {
+          const rows =
+            state.allAdmins
+              .map(
+                (a) => `
+                    <tr class="hover:bg-slate-50 border-b border-slate-100 last:border-0 cursor-pointer group" onclick="openAdminDrawer('${a.id}')">
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            <div class="font-semibold text-slate-800 flex items-center gap-2 group-hover:text-brand-primary transition-colors">
+                                @${a.username}
+                                <i data-lucide="external-link" class="w-3.5 h-3.5 text-brand-primary opacity-0 group-hover:opacity-100 transition-opacity"></i>
+                            </div>
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-slate-600">${a.email}</td>
+                        <td class="px-6 py-4 whitespace-nowrap"><span class="px-2.5 py-1 text-xs font-semibold rounded-full bg-slate-900 text-white">${a.access_level}</span></td>
+                    </tr>
+                `,
+              )
+              .join("") ||
+            `<tr><td colspan="3" class="px-6 py-8 text-center text-slate-500">No admins found.</td></tr>`;
+
+          tabContent = `<table class="min-w-full"><thead class="bg-slate-50"><tr><th class="px-6 py-3 text-left text-xs font-bold text-slate-500 uppercase">Username</th><th class="px-6 py-3 text-left text-xs font-bold text-slate-500 uppercase">Email</th><th class="px-6 py-3 text-left text-xs font-bold text-slate-500 uppercase">Access Level</th></tr></thead><tbody class="bg-white">${rows}</tbody></table>`;
+        } else if (state.workforceTab === "roles") {
+          const rows = state.allRoles
+            .map(
+              (r) =>
+                `<tr class="border-b border-slate-100 last:border-0 role-row-item"><td class="px-6 py-4 font-semibold text-slate-800">${r.department_name}</td><td class="px-6 py-4 text-slate-600">${r.role_name}</td></tr>`,
+            )
+            .join("");
+          tabContent = `<table class="min-w-full"><thead class="bg-slate-50"><tr><th class="px-6 py-3 text-left text-xs font-bold text-slate-500 uppercase flex-1">Department</th><th class="px-6 py-3 text-left text-xs font-bold text-slate-500 uppercase flex-1">Role Definition</th></tr></thead><tbody class="bg-white" id="roles_tbody">${rows}</tbody></table>`;
+        }
+
+        return `
+                <div class="flex justify-between items-center mb-6">
+                    <div>
+                        <h3 class="text-2xl font-bold text-slate-800">Workforce Directory</h3>
+                        <p class="text-slate-500 mt-1">Manage personnel, access tiers, and financial profiles.</p>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <button onclick="openCreateEmployeeModal()" class="${state.workforceTab === "employees" ? "inline-flex" : "hidden"} bg-brand-primary hover:bg-indigo-700 text-white px-4 py-2 rounded-lg shadow-sm transition-colors items-center gap-2 font-medium whitespace-nowrap">
+                            <i data-lucide="user-plus" class="w-4 h-4"></i> Add Record
+                        </button>
+                        <button onclick="openCreateAdminModal()" class="${state.workforceTab === "admins" ? "inline-flex" : "hidden"} bg-slate-900 hover:bg-black text-white px-4 py-2 rounded-lg shadow-sm transition-colors items-center gap-2 font-medium whitespace-nowrap">
+                            <i data-lucide="shield" class="w-4 h-4"></i> Add Admin
+                        </button>
+                        <button onclick="openCreateRoleModal()" class="${state.workforceTab === "roles" ? "inline-flex" : "hidden"} bg-slate-800 hover:bg-slate-700 text-white px-4 py-2 rounded-lg shadow-sm transition-colors items-center gap-2 font-medium whitespace-nowrap">
+                            <i data-lucide="briefcase" class="w-4 h-4"></i> Add Role
+                        </button>
+                    </div>
+                </div>
+
+                <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+                    <div class="border-b border-slate-200 flex p-2 gap-2 bg-slate-50 overflow-x-auto">
+                        <button onclick="routeApp('workforce', 'employees')" class="whitespace-nowrap px-4 py-2 text-sm font-semibold rounded-lg transition-colors ${state.workforceTab === "employees" ? "bg-white text-brand-primary shadow-sm border border-slate-200" : "text-slate-500 hover:text-slate-800"}">Employees</button>
+                        <button onclick="routeApp('workforce', 'admins')" class="whitespace-nowrap px-4 py-2 text-sm font-semibold rounded-lg transition-colors ${state.workforceTab === "admins" ? "bg-white text-brand-primary shadow-sm border border-slate-200" : "text-slate-500 hover:text-slate-800"}">System Admins</button>
+                        <button onclick="routeApp('workforce', 'roles')" class="whitespace-nowrap px-4 py-2 text-sm font-semibold rounded-lg transition-colors ${state.workforceTab === "roles" ? "bg-white text-brand-primary shadow-sm border border-slate-200" : "text-slate-500 hover:text-slate-800"}">Departments & Roles</button>
+                    </div>
+                    
+                    ${
+                      state.workforceTab === "employees"
+                        ? `
+                    <div class="p-4 border-b border-slate-100 bg-white">
+                        <div class="relative max-w-sm">
+                            <i data-lucide="search" class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400"></i>
+                            <input type="text" id="adminEmpSearch" value="${state.empSearchTerm || ""}" oninput="handleAdminEmpSearchDOM(this.value)" placeholder="Search employees..." class="w-full pl-10 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:outline-none focus:border-brand-primary focus:ring-1 focus:ring-brand-primary transition-all">
+                        </div>
+                    </div>`
+                        : ""
+                    }
+
+                    ${
+                      state.workforceTab === "roles"
+                        ? `
+                    <div class="p-4 border-b border-slate-100 bg-white flex justify-between items-center flex-wrap gap-4">
+                        <div class="relative max-w-sm flex-1">
+                            <i data-lucide="search" class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400"></i>
+                            <input type="text" id="adminRoleSearch" oninput="handleAdminRoleSearchDOM(this.value)" placeholder="Search departments or roles..." class="w-full pl-10 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:outline-none focus:border-brand-primary focus:ring-1 focus:ring-brand-primary transition-all">
+                        </div>
+                    </div>`
+                        : ""
+                    }
+
+                    <div class="overflow-x-auto">
+                        ${tabContent}
+                    </div>
+                </div>
+            `;
+      }
+
+      function openCreateEmployeeModal() {
+        const depts = [...new Set(state.allRoles.map((r) => r.department_name))]
+          .filter((d) => d)
+          .sort();
+        const deptOptions = depts
+          .map((d) => `<option value="${d}">${d}</option>`)
+          .join("");
+
+        const roleOptions = state.allRoles
+          .map(
+            (r) =>
+              `<option value="${r.id}" data-dept="${r.department_name}">${r.role_name} (${r.department_name})</option>`,
+          )
+          .join("");
+
+        const formHtml = `
+                <form onsubmit="handleAdminCreateEntity(event, '/employees/create', 'workforce')" class="space-y-4">
+                    <div class="grid grid-cols-2 gap-4">
+                        <div class="col-span-2 sm:col-span-1">
+                            <label class="block text-sm font-semibold text-slate-700 mb-1">Full Name *</label>
+                            <input type="text" name="full_name" required class="input-field w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-lg outline-none cursor-text">
+                        </div>
+                        <div class="col-span-2 sm:col-span-1">
+                            <label class="block text-sm font-semibold text-slate-700 mb-1">Email</label>
+                            <input type="email" name="email" class="input-field w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-lg outline-none cursor-text">
+                        </div>
+                        <div class="col-span-2 sm:col-span-1">
+                            <label class="block text-sm font-semibold text-slate-700 mb-1">Contact Number</label>
+                            <input type="text" name="contact_number" class="input-field w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-lg outline-none cursor-text">
+                        </div>
+                        <div class="col-span-2 sm:col-span-1">
+                            <label class="block text-sm font-semibold text-slate-700 mb-1">Monthly Salary (₹)</label>
+                            <input type="number" name="salary" min="0" step="1000" class="input-field w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-lg outline-none cursor-text">
+                        </div>
+                        <div class="col-span-2 sm:col-span-1">
+                            <label class="block text-sm font-semibold text-slate-700 mb-1">Department *</label>
+                            <select name="department_select" id="emp_dept_select" required onchange="handleAdminDeptChange()" class="input-field w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-lg outline-none cursor-pointer">
+                                <option value="">-- Select Department --</option>
+                                ${deptOptions}
+                                <option value="__CREATE_NEW__" class="font-bold text-brand-primary">+ Create New Department...</option>
+                            </select>
+                            <input type="text" name="department_custom" id="emp_dept_custom" placeholder="Enter new department" class="hidden mt-2 input-field w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-lg outline-none">
+                        </div>
+                        <div class="col-span-2 sm:col-span-1">
+                            <label class="block text-sm font-semibold text-slate-700 mb-1">Job Role *</label>
+                            <select name="role_id" id="emp_role_select" required onchange="handleAdminRoleChange()" class="input-field w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-lg outline-none cursor-pointer">
+                                <option value="">-- Select Job Role --</option>
+                                ${roleOptions}
+                                <option value="__CREATE_NEW__" class="font-bold text-brand-primary">+ Create New Job Role...</option>
+                            </select>
+                            <input type="text" name="job_title_custom" id="emp_role_custom" placeholder="Enter new job role" class="hidden mt-2 input-field w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-lg outline-none">
+                        </div>
+                    </div>
+                    <div class="p-4 bg-slate-50 rounded-lg border border-slate-200 mt-4">
+                        <h4 class="text-sm font-bold text-slate-700 mb-3 border-b border-slate-200 pb-2">Financial Rates (Auto-Calculation)</h4>
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-xs uppercase tracking-wider font-semibold text-slate-500 mb-1">Hourly Cost (₹) - Auto</label>
+                                <input type="number" name="hourly_cost_rate" min="0" step="0.5" value="0" readonly class="input-field w-full px-4 py-2 bg-slate-100 border border-slate-200 rounded-lg outline-none cursor-not-allowed">
+                            </div>
+                            <div>
+                                <label class="block text-xs uppercase tracking-wider font-semibold text-brand-primary mb-1">Hourly Billing (₹)</label>
+                                <input type="number" name="hourly_billing_rate" min="0" step="0.5" value="0" class="input-field w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none">
+                            </div>
+                        </div>
+                        <p class="text-xs text-slate-400 mt-2">These rates are invisible to the employee and drive all profit/loss calculations.</p>
+                    </div>
+                    <div class="mt-6 flex justify-end gap-3">
+                        <button type="button" onclick="closeModal()" class="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg font-medium transition-colors">Cancel</button>
+                        <button type="submit" class="px-4 py-2 bg-brand-primary text-white rounded-lg font-medium shadow-sm hover:bg-indigo-700 transition-colors inline-flex items-center gap-2"><i data-lucide="check" class="w-4 h-4"></i>Register Employee</button>
+                    </div>
+                </form>
+            `;
+        openModal("Register New Employee", formHtml);
+      }
+
+      window.handleAdminDeptChange = function () {
+        const val = document.getElementById("emp_dept_select").value;
+        const customDeptInput = document.getElementById("emp_dept_custom");
+        const roleSelect = document.getElementById("emp_role_select");
+
+        if (val === "__CREATE_NEW__") {
+          customDeptInput.classList.remove("hidden");
+          customDeptInput.required = true;
+          Array.from(roleSelect.options).forEach((opt) => (opt.hidden = false));
+        } else {
+          customDeptInput.classList.add("hidden");
+          customDeptInput.required = false;
+          customDeptInput.value = "";
+
+          let visibleCount = 0;
+          Array.from(roleSelect.options).forEach((opt) => {
+            if (opt.value === "" || opt.value === "__CREATE_NEW__") {
+              opt.hidden = false;
+            } else if (val === "") {
+              opt.hidden = false;
+              visibleCount++;
+            } else {
+              const isMatch = opt.getAttribute("data-dept") === val;
+              opt.hidden = !isMatch;
+              if (isMatch) visibleCount++;
+            }
+          });
+
+          if (roleSelect.options[roleSelect.selectedIndex].hidden) {
+            roleSelect.value = "";
+          }
+        }
+      };
+
+      window.handleAdminRoleChange = function () {
+        const val = document.getElementById("emp_role_select").value;
+        const customRoleInput = document.getElementById("emp_role_custom");
+        if (val === "__CREATE_NEW__") {
+          customRoleInput.classList.remove("hidden");
+          customRoleInput.required = true;
+        } else {
+          customRoleInput.classList.add("hidden");
+          customRoleInput.required = false;
+          customRoleInput.value = "";
+        }
+      };
+
+      window.switchAttendanceTab = function (tab) {
+        state.attendanceTab = tab;
+        routeApp("attendance");
+      };
+
+      window.exportActiveTableToCSV = function () {
+        const table = document
+          .getElementById("attendanceDataBlock")
+          .querySelector("table");
+        if (!table) return;
+        let csv = [];
+        const rows = table.querySelectorAll("tr");
+        for (let i = 0; i < rows.length; i++) {
+          let rowData = [];
+          const cols = rows[i].querySelectorAll("td, th");
+          if (cols.length === 0) continue;
+
+          for (let j = 0; j < cols.length; j++) {
+            // Clean text and escape quotes
+            let text = cols[j].innerText.trim().replace(/\s+/g, " ");
+            rowData.push('"' + text.replace(/"/g, '""') + '"');
+          }
+          csv.push(rowData.join(","));
+        }
+
+        // Standard CSV structure: Newline separated rows with UTF-8 BOM for Excel compatibility
+        const csvString = "\uFEFF" + csv.join("\n");
+        const csvFile = new Blob([csvString], {
+          type: "text/csv;charset=utf-8;",
+        });
+
+        const downloadLink = document.createElement("a");
+        const timestamp = new Date()
+          .toISOString()
+          .replace(/[:.]/g, "-")
+          .slice(0, 19);
+        downloadLink.download = `export_${state.attendanceTab}_${timestamp}.csv`;
+        downloadLink.href = window.URL.createObjectURL(csvFile);
+        downloadLink.style.display = "none";
+        document.body.appendChild(downloadLink);
+        downloadLink.click();
+        document.body.removeChild(downloadLink);
+      };
+
+      window.filterActiveTableByDate = function (dateVal) {
+        const tbody = document.getElementById("attendanceDataBody");
+        if (!tbody) return;
+        const rows = tbody.querySelectorAll("tr");
+        rows.forEach((row) => {
+          // The date column is generally the second column in all our tables
+          const dateCell = row.cells[1];
+          if (!dateCell) return;
+          const cellText = dateCell.innerText.trim();
+
+          if (!dateVal) {
+            row.style.display = "";
+            return;
+          }
+
+          // format dateVal (YYYY-MM-DD) to locale string roughly matching our cellText
+          const filterDate = new Date(dateVal);
+          const cellDate = new Date(cellText);
+
+          if (
+            filterDate.toDateString() === cellDate.toDateString() ||
+            cellText.includes(dateVal)
+          ) {
+            row.style.display = "";
+          } else {
+            row.style.display = "none";
+          }
+        });
+      };
+
+      function getAdminAttendanceTemplate() {
+        const tab = state.attendanceTab || "logs";
+
+        let tableHeaders = "";
+        let tableRows = "";
+        let title = "";
+
+        if (tab === "logs") {
+          title = "Attendance Logs";
+          tableHeaders = `
+                    <th class="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">Employee</th>
+                    <th class="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">Date</th>
+                    <th class="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">Check In</th>
+                    <th class="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">Check Out</th>
+                    <th class="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">Total Hrs</th>
+                    <th class="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">Status</th>
+                    <th class="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">IP Address</th>
+                `;
+          const sortedAttendance = [...state.allAttendance].sort(
+            (a, b) => new Date(b.date) - new Date(a.date),
+          );
+          if (sortedAttendance.length === 0) {
+            tableRows = `<tr><td colspan="7" class="px-6 py-8 text-center text-slate-500">No attendance records found</td></tr>`;
+          } else {
+            tableRows = sortedAttendance
+              .map((record) => {
+                const emp =
+                  state.allEmployees.find((e) => e.id === record.employee_id) ||
+                  {};
+                const empName =
+                  emp.full_name || emp.username || "Unknown Employee";
+                const dateStr = new Date(record.date).toLocaleDateString();
+                const checkInStr = record.check_in_time
+                  ? new Date(record.check_in_time).toLocaleTimeString([], {
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    })
+                  : "--";
+                const checkOutStr = record.check_out_time
+                  ? new Date(record.check_out_time).toLocaleTimeString([], {
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    })
+                  : "--";
+
+                let statusBadge = `<span class="px-2.5 py-1 bg-slate-100 text-slate-700 rounded-full text-xs font-bold border border-slate-200">${record.status}</span>`;
+                return `
+                            <tr class="border-b border-slate-100 hover:bg-slate-50/50 transition-colors">
+                                <td class="px-6 py-4 font-medium text-slate-800">${empName}</td>
+                                <td class="px-6 py-4 text-sm text-slate-600">${dateStr}</td>
+                                <td class="px-6 py-4 text-sm text-slate-600">${checkInStr}</td>
+                                <td class="px-6 py-4 text-sm text-slate-600">${checkOutStr}</td>
+                                <td class="px-6 py-4 text-sm font-bold text-slate-800">${record.total_hours ? record.total_hours.toFixed(2) + "h" : "--"}</td>
+                                <td class="px-6 py-4">${statusBadge}</td>
+                                <td class="px-6 py-4 text-sm text-slate-500">${record.ip_address || "--"}</td>
+                            </tr>
+                        `;
+              })
+              .join("");
+          }
+        } else if (tab === "login") {
+          title = "Login History";
+          tableHeaders = `
+                    <th class="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">User</th>
+                    <th class="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">Date/Time</th>
+                    <th class="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">Role</th>
+                    <th class="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">IP Address</th>
+                    <th class="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">Device/User Agent</th>
+                `;
+          const sortedHistory = [...(state.allLoginHistory || [])].sort(
+            (a, b) => new Date(b.login_timestamp) - new Date(a.login_timestamp),
+          );
+          if (sortedHistory.length === 0) {
+            tableRows = `<tr><td colspan="5" class="px-6 py-8 text-center text-slate-500">No login history found</td></tr>`;
+          } else {
+            tableRows = sortedHistory
+              .map((record) => {
+                let userName = record.user_id;
+                const dtStr = new Date(record.login_timestamp).toLocaleString();
+                return `
+                            <tr class="border-b border-slate-100 hover:bg-slate-50/50 transition-colors">
+                                <td class="px-6 py-4 font-medium text-slate-800">${userName}</td>
+                                <td class="px-6 py-4 text-sm text-slate-600">${dtStr}</td>
+                                <td class="px-6 py-4 text-sm text-slate-600">${record.user_role}</td>
+                                <td class="px-6 py-4 text-sm text-slate-600">${record.ip_address || "--"}</td>
+                                <td class="px-6 py-4 text-sm text-slate-500 truncate max-w-xs" title="${record.user_agent}">${record.user_agent || "--"}</td>
+                            </tr>
+                        `;
+              })
+              .join("");
+          }
+        } else if (tab === "leave") {
+          title = "Leave Requests";
+          tableHeaders = `
+                    <th class="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">Employee</th>
+                    <th class="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">Start Date</th>
+                    <th class="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">End Date</th>
+                    <th class="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">Reason</th>
+                    <th class="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider">Status</th>
+                    <th class="px-6 py-3 text-xs font-bold text-slate-500 uppercase tracking-wider text-right">Actions</th>
+                `;
+          const sortedLeaves = [...(state.allLeaveRequests || [])].sort(
+            (a, b) => new Date(b.created_at) - new Date(a.created_at),
+          );
+          if (sortedLeaves.length === 0) {
+            tableRows = `<tr><td colspan="6" class="px-6 py-8 text-center text-slate-500">No leave requests found</td></tr>`;
+          } else {
+            tableRows = sortedLeaves
+              .map((record) => {
+                const emp =
+                  state.allEmployees.find((e) => e.id === record.employee_id) ||
+                  {};
+                const empName =
+                  emp.full_name || emp.username || "Unknown Employee";
+                const startStr = new Date(
+                  record.start_date,
+                ).toLocaleDateString();
+                const endStr = new Date(record.end_date).toLocaleDateString();
+
+                let statusColor = "bg-slate-100 text-slate-700";
+                if (record.status === "Approved")
+                  statusColor = "bg-emerald-100 text-emerald-800";
+                if (record.status === "Rejected")
+                  statusColor = "bg-rose-100 text-rose-800";
+                if (record.status === "Pending")
+                  statusColor = "bg-amber-100 text-amber-800";
+
+                let statusBadge = `<span class="px-2.5 py-1 ${statusColor} rounded-full text-xs font-bold border border-white/20 shadow-sm">${record.status}</span>`;
+
+                let actionsHtml = "";
+                if (record.status === "Pending") {
+                  actionsHtml = `
+                                <div class="flex justify-end gap-2">
+                                    <button onclick="updateLeaveStatus('${record.id}', 'Approved')" class="p-1.5 bg-emerald-50 text-emerald-600 hover:bg-emerald-500 hover:text-white rounded-lg transition-colors border border-emerald-200 hover:border-emerald-500" title="Approve">
+                                        <i data-lucide="check" class="w-4 h-4"></i>
+                                    </button>
+                                    <button onclick="updateLeaveStatus('${record.id}', 'Rejected')" class="p-1.5 bg-rose-50 text-rose-600 hover:bg-rose-500 hover:text-white rounded-lg transition-colors border border-rose-200 hover:border-rose-500" title="Reject">
+                                        <i data-lucide="x" class="w-4 h-4"></i>
+                                    </button>
+                                </div>
+                            `;
+                } else {
+                  actionsHtml = `<div class="text-right text-xs text-slate-400 italic">Resolved</div>`;
+                }
+
+                return `
+                            <tr class="border-b border-slate-100 hover:bg-slate-50/50 transition-colors">
+                                <td class="px-6 py-4 font-medium text-slate-800">${empName}</td>
+                                <td class="px-6 py-4 text-sm text-slate-600">${startStr}</td>
+                                <td class="px-6 py-4 text-sm text-slate-600">${endStr}</td>
+                                <td class="px-6 py-4 text-sm text-slate-600 truncate max-w-xs" title="${record.reason}">${record.reason}</td>
+                                <td class="px-6 py-4">${statusBadge}</td>
+                                <td class="px-6 py-4">${actionsHtml}</td>
+                            </tr>
+                        `;
+              })
+              .join("");
+          }
+        }
+
+        return `
+                <div class="space-y-6 fade-in">
+                    <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white p-6 rounded-2xl border border-slate-200/60 shadow-sm">
+                        <div>
+                            <h3 class="text-xl font-bold text-slate-800 flex items-center gap-2">
+                                <i data-lucide="calendar-clock" class="w-6 h-6 text-brand-primary"></i> Attendance Tracking
+                            </h3>
+                            <p class="text-slate-500 mt-1">Manage attendance, leave requests, and login histories.</p>
+                        </div>
+                        <div class="flex items-center gap-3">
+                            <button onclick="loadAdminWorkspaceData().then(() => routeApp('attendance'))" class="btn-secondary px-4 py-2 rounded-xl flex items-center gap-2 text-sm font-medium transition-colors">
+                                <i data-lucide="refresh-cw" class="w-4 h-4"></i> Refresh
+                            </button>
+                            <button onclick="exportActiveTableToCSV()" class="btn-primary px-4 py-2 rounded-xl flex items-center gap-2 text-sm font-medium transition-colors shadow-brand">
+                                <i data-lucide="download" class="w-4 h-4"></i> Export Report
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Toggle Section -->
+                    <div class="flex items-center gap-2 p-1 bg-slate-100/80 backdrop-blur-sm rounded-xl inline-flex shadow-inner">
+                        <button onclick="switchAttendanceTab('logs')" class="px-5 py-2.5 rounded-lg text-sm font-semibold transition-all ${tab === "logs" ? "bg-white text-slate-800 shadow-sm" : "text-slate-500 hover:text-slate-700 hover:bg-slate-200/50"}">
+                            Attendance Logs
+                        </button>
+                        <button onclick="switchAttendanceTab('login')" class="px-5 py-2.5 rounded-lg text-sm font-semibold transition-all ${tab === "login" ? "bg-white text-slate-800 shadow-sm" : "text-slate-500 hover:text-slate-700 hover:bg-slate-200/50"}">
+                            Login History
+                        </button>
+                        <button onclick="switchAttendanceTab('leave')" class="px-5 py-2.5 rounded-lg text-sm font-semibold transition-all ${tab === "leave" ? "bg-white text-slate-800 shadow-sm" : "text-slate-500 hover:text-slate-700 hover:bg-slate-200/50"}">
+                            Leave Requests
+                        </button>
+                    </div>
+
+                    <div class="b
+g-white rounded-2xl border border-slate-200/60 shadow-sm overflow-hidden" id="attendanceDataBlock">
+                        <div class="p-5 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
+                            <h4 class="font-bold text-slate-800 text-sm">${title}</h4>
+                            <div class="flex gap-2">
+                                <input type="date" onchange="filterActiveTableByDate(this.value)" class="form-input text-sm px-3 py-1.5 rounded-lg w-40" title="Filter by date">
+                            </div>
+                        </div>
+                        <div class="overflow-x-auto">
+                            <table class="w-full text-left whitespace-nowrap">
+                                <thead>
+                                    <tr class="bg-slate-50 border-b border-slate-200">
+                                        ${tableHeaders}
+                                    </tr>
+                                </thead>
+                                <tbody id="attendanceDataBody">
+                                    ${tableRows}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            `;
+      }
+
+      function getAdminTimesheetsTemplate() {
+        const sortedTasks = [...state.allTasks].sort(
+          (a, b) => new Date(b.created_at) - new Date(a.created_at),
+        );
+
+        const rows =
+          sortedTasks
+            .map((t) => {
+              const date = new Date(
+                t.date || t.created_at,
+              ).toLocaleDateString();
+              const isDev = t.task_type === "developer";
+              const employee = state.allEmployees.find(
+                (e) => e.id === t.employee_id,
+              );
+              const empName = employee ? employee.full_name : "Unknown";
+              const project = state.allProjects.find(
+                (p) => p.id === t.project_id,
+              );
+              const projName = project ? project.name : "General";
+
+              const profit = parseFloat(t.profit_loss || 0);
+              const profitClass =
+                profit >= 0
+                  ? "text-brand-accent bg-emerald-50"
+                  : "text-brand-alert bg-rose-50";
+              const profitSign = profit >= 0 ? "+" : "";
+
+              return `
+                    <tr class="hover:bg-slate-50 border-b border-slate-100 last:border-0 cursor-pointer group" onclick="openTaskDetailsModal('${t.id}')">
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            <div class="font-semibold text-slate-800 group-hover:text-brand-primary transition-colors">${empName}</div>
+                            <div class="text-xs text-slate-500">${date}</div>
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap"><span class="px-2 py-1 text-xs font-semibold rounded bg-slate-100 text-slate-600">${projName}</span></td>
+                        <td class="px-6 py-4 whitespace-nowrap"><div class="flex items-center text-xs font-medium text-slate-600"><i data-lucide="${isDev ? "terminal" : "video"}" class="w-4 h-4 mr-1 ${isDev ? "text-indigo-500" : "text-pink-500"}"></i> ${isDev ? "Engineering" : "Content"}</div></td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-slate-800">${parseFloat(t.hours_logged).toFixed(1)} <span class="text-xs text-slate-400 font-normal">hrs</span></td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-slate-600">${formatCurrency(t.employee_cost)}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-slate-800">${formatCurrency(t.billing_amount)}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm font-bold"><span class="px-2 py-1 rounded ${profitClass}">${profitSign}${formatCurrency(profit)}</span></td>
+                    </tr>
+                `;
+            })
+            .join("") ||
+          `<tr><td colspan="7" class="px-6 py-8 text-center text-slate-500">No timesheets recorded yet.</td></tr>`;
+
+        return `
+                <div class="flex justify-between items-center mb-6">
+                    <div>
+                        <h3 class="text-2xl font-bold text-slate-800">Financial Ledger (Timesheets)</h3>
+                        <p class="text-slate-500 mt-1">Universal view of all logged hours, auto-calculated costs, and profit margins.</p>
+                    </div>
+                </div>
+                <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+                    <div class="overflow-x-auto">
+                        <table class="min-w-full divide-y divide-slate-200">
+                            <thead class="bg-slate-50">
+                                <tr>
+                                    <th class="px-6 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">Employee & Date</th>
+                                    <th class="px-6 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">Project</th>
+                                    <th class="px-6 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">Task Type</th>
+                                    <th class="px-6 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">Hours</th>
+                                    <th class="px-6 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">Cost (Burn)</th>
+                                    <th class="px-6 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">Billed (Earn)</th>
+                                    <th class="px-6 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">Net Profit</th>
+                                </tr>
+                            </thead>
+                            <tbody class="bg-white divide-y divide-slate-200">
+                                ${rows}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            `;
+      }
+
+      async function handleAdminCreateEntity(
+        event,
+        endpoint,
+        refreshView,
+        methodOverride = "POST",
+      ) {
+        event.preventDefault();
+        const form = event.target;
+        const submitBtn = form.querySelector('button[type="submit"]');
+        const originalText = submitBtn.innerText;
+        submitBtn.innerHTML =
+          '<i data-lucide="loader-2" class="w-5 h-5 animate-spin mx-auto"></i>';
+        submitBtn.disabled = true;
+
+        const formData = new FormData(form);
+        const payload = Object.fromEntries(formData.entries());
+
+        if (payload.budget) payload.budget = parseFloat(payload.budget);
+        if (payload.hourly_cost_rate)
+          payload.hourly_cost_rate = parseFloat(payload.hourly_cost_rate);
+        if (payload.hourly_billing_rate)
+          payload.hourly_billing_rate = parseFloat(payload.hourly_billing_rate);
+        if (payload.salary) payload.salary = parseFloat(payload.salary);
+
+        // Special handling for employee creations
+        if (payload.department_select !== undefined) {
+          let isNewRole =
+            payload.role_id === "__CREATE_NEW__" ||
+            payload.department_select === "__CREATE_NEW__";
+
+          if (isNewRole) {
+            let deptName =
+              payload.department_select === "__CREATE_NEW__"
+                ? payload.department_custom
+                : payload.department_select;
+            let roleName =
+              payload.role_id === "__CREATE_NEW__"
+                ? payload.job_title_custom
+                : state.allRoles.find(
+                    (r) => String(r.id) === String(payload.role_id),
+                  )?.role_name;
+            if (!roleName) roleName = "General Employee";
+
+            try {
+              const roleResp = await apiFetch("/departments-roles/create", {
+                method: "POST",
+                body: { department_name: deptName, role_name: roleName },
+              });
+              payload.role_id = roleResp.id;
+              if (!payload.role_id && roleResp.data)
+                payload.role_id = roleResp.data.id;
+            } catch (err) {
+              showToast("Failed to create new department/role.", "error");
+              submitBtn.innerHTML = originalText;
+              submitBtn.disabled = false;
+              return; // Abort employee creation
+            }
+          }
+
+          // Strip any fields not in the Employees database table to prevent 500 errors
+          delete payload.department_select;
+          delete payload.department_custom;
+          delete payload.job_title_custom;
+          delete payload.department;
+          delete payload.job_title;
+          delete payload.role_name;
+        }
+
+        // Special handling for role creations
+        if (payload.department_name_select !== undefined) {
+          payload.department_name =
+            payload.department_name_select === "__CREATE_NEW__"
+              ? payload.department_name_custom
+              : payload.department_name_select;
+          delete payload.department_name_select;
+          delete payload.department_name_custom;
+        }
+
+        try {
+          const response = await apiFetch(endpoint, {
+            method: methodOverride,
+            body: payload,
+          });
+
+          // ALWAYS UPDATE STATE INSTANTLY
+          if (!endpoint.includes("/update/")) {
+            if (refreshView === "workforce") {
+              if (endpoint.includes("/employees/"))
+                state.allEmployees.unshift(response);
+              if (endpoint.includes("/admins/"))
+                state.allAdmins.unshift(response);
+              if (endpoint.includes("/roles/"))
+                state.allRoles.unshift(response);
+            } else if (refreshView === "projects") {
+              state.allProjects.unshift(response);
+            }
+          } else {
+            if (
+              refreshView === "workforce" &&
+              endpoint.includes("/employees/update/")
+            ) {
+              const idx = state.allEmployees.findIndex(
+                (e) => e.id === response.id,
+              );
+              if (idx !== -1) state.allEmployees[idx] = response;
+            } else if (
+              refreshView === "projects" &&
+              endpoint.includes("/projects/update/")
+            ) {
+              const idx = state.allProjects.findIndex(
+                (p) => p.id === response.id,
+              );
+              if (idx !== -1) state.allProjects[idx] = response;
+            }
+          }
+
+          if (
+            response.generated_password ||
+            (response.data && response.data.generated_password)
+          ) {
+            const pwd =
+              response.generated_password || response.data.generated_password;
+            const uname =
+              response.username || (response.data && response.data.username);
+            const eml =
+              payload.email ||
+              response.email ||
+              (response.data && response.data.email);
+
+            // ARCHITECTURE FIX: Close the creation modal immediately to prevent UI conflicts
+            closeModal();
+
+            // Update the background table instantly
+            routeApp(refreshView);
+
+            // Open the credentials modal independently after the first modal finishes closing
+            setTimeout(() => {
+              openCredentialsModal(uname, pwd, eml, null);
+            }, 350);
+          } else {
+            showToast(
+              `Record ${endpoint.includes("/update/") ? "updated" : "created"} successfully!`,
+              "success",
+            );
+            closeModal();
+
+            if (
+              endpoint.includes("/employees/update/") &&
+              !document
+                .getElementById("drawerOverlay")
+                .classList.contains("hidden")
+            ) {
+              const idPart = endpoint.split("/").pop();
+              if (idPart) openEmployeeDetails(idPart);
+            }
+            routeApp(refreshView);
+          }
+        } catch (error) {
+          showToast(error.message, "error");
+          submitBtn.innerHTML = originalText;
+          submitBtn.disabled = false;
+          if (window.lucide) lucide.createIcons();
+        }
+      }
+
+      function openAdminDrawer(adminId) {
+        const adm = state.allAdmins.find((a) => a.id === adminId);
+        if (!adm) return;
+        const currentAdmin = state.user; // Decoded JWT from state
+        
+        const getInitials = (name) =>
+          name ? name.substring(0, 2).toUpperCase() : "AD";
+
+        document.getElementById("ad_avatar").innerText = getInitials(
+          adm.username,
+        );
+        document.getElementById("ad_username").innerText = "@" + adm.username;
+        document.getElementById("ad_access").innerText = adm.access_level;
+        document.getElementById("ad_email").innerText = adm.email;
+        document.getElementById("ad_email").href = `mailto:${adm.email}`;
+        document.getElementById("ad_id").innerText = adm.id;
+
+        // RBAC Logic for Delete Button
+        const actionsArea = document.getElementById("ad_actions_area");
+        let deleteBtnHtml = '';
+        
+        if (currentAdmin && currentAdmin.access_level === 'SystemAdmin') {
+            const isSelf = adm.id === currentAdmin.id;
+            const targetIsSuper = adm.access_level === 'SystemAdmin';
+            
+            // Allow deletion if target is not SuperAdmin OR if it is the user themselves
+            if (!targetIsSuper || isSelf) {
+                deleteBtnHtml = `
+                    <button onclick="deleteAdminAccount('${adm.id}', '${adm.username}', ${isSelf})" 
+                        class="w-full py-3 bg-rose-50 text-rose-600 rounded-xl font-bold text-sm hover:bg-rose-100 transition-colors flex items-center justify-center gap-2">
+                        <i data-lucide="trash-2" class="w-4 h-4"></i>
+                        ${isSelf ? 'Delete My Account' : 'Delete Administrator'}
+                    </button>
+                `;
+            }
+        }
+        
+        actionsArea.innerHTML = deleteBtnHtml || `
+            <div class="flex items-center justify-center gap-2 text-slate-400">
+                <i data-lucide="shield-check" class="w-4 h-4"></i>
+                <span class="text-[10px] font-bold uppercase tracking-widest">Account Protected</span>
+            </div>
+        `;
+
+        const overlay = document.getElementById("adminDrawerOverlay");
+        const panel = document.getElementById("adminDrawerPanel");
+        overlay.classList.remove("hidden");
+        setTimeout(() => {
+          overlay.classList.remove("opacity-0");
+          panel.classList.remove("translate-x-full");
+        }, 10);
+        
+        if (window.lucide) lucide.createIcons();
+      }
+
+      async function deleteAdminAccount(adminId, username, isSelf) {
+          const confirmMsg = isSelf 
+            ? "CRITICAL ACTION: You are about to delete YOUR OWN administrator account. This will immediately terminate your session and you will lose all access to the system. Are you absolutely sure?"
+            : `Are you sure you want to permanently delete the administrator account for @${username}? This action cannot be undone.`;
+            
+          const confirmed = await customConfirm(
+              isSelf ? "CRITICAL: Delete Self" : "Delete Administrator",
+              confirmMsg,
+              isSelf ? "Delete My Account" : "Confirm Deletion",
+              "Cancel",
+              true
+          );
+          
+          if (!confirmed) return;
+          
+          try {
+              await apiFetch(`/admins/delete/${adminId}`, { method: 'DELETE' });
+              showToast(`Administrator @${username} deleted successfully.`, "success");
+              
+              if (isSelf) {
+                  logout(false);
+                  return;
+              }
+              
+              closeAdminDrawer();
+              await loadAdminWorkspaceData();
+              routeApp("workforce", "admins");
+          } catch (error) {
+              showToast(error.message, "error");
+          }
+      }
+
+      async function deleteEmployeeAccount(empId, name) {
+          const confirmed = await customConfirm(
+              "Permanent Deletion",
+              `Are you sure you want to permanently delete the operative profile for ${name}? This will purge all their records from the system including attendance and timesheets. This action is irreversible.`,
+              "Delete Profile",
+              "Cancel",
+              true
+          );
+          if (!confirmed) return;
+          
+          try {
+              await apiFetch(`/employees/delete/${empId}`, { method: 'DELETE' });
+              showToast(`${name} has been removed from the organization database.`, "success");
+              closeEmployeeDetails();
+              await loadAdminWorkspaceData();
+              routeApp("workforce", "employees");
+          } catch (err) {
+              showToast("Deletion failed: " + err.message, "error");
+          }
+      }
+
+      function closeAdminDrawer() {
+        const overlay = document.getElementById("adminDrawerOverlay");
+        const panel = document.getElementById("adminDrawerPanel");
+        overlay.classList.add("opacity-0");
+        panel.classList.add("translate-x-full");
+        setTimeout(() => {
+          overlay.classList.add("hidden");
+        }, 300);
+      }
+
+      function openCreateAdminModal() {
+        const formHtml = `
+                <form onsubmit="handleAdminCreateEntity(event, '/admins/create', 'workforce')" class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-semibold text-slate-700 mb-1">Username *</label>
+                        <input type="text" name="username" required class="input-field w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-lg outline-none">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-semibold text-slate-700 mb-1">Email *</label>
+                        <input type="email" name="email" required class="input-field w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-lg outline-none">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-semibold text-slate-700 mb-1">Access Level *</label>
+                        <select name="access_level" required class="input-field w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-lg outline-none cursor-pointer">
+                            <option value="SystemAdmin">System Admin</option>
+                            <option value="ManagerAdmin">Manager Admin</option>
+                            <option value="HRAdmin">HR Admin</option>
+                        </select>
+                    </div>
+                    <div class="mt-6 flex justify-end gap-3">
+                        <button type="button" onclick="closeModal()" class="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg font-medium transition-colors">Cancel</button>
+                        <button type="submit" class="px-4 py-2 bg-slate-900 text-white rounded-lg font-medium shadow-sm hover:bg-black transition-colors">Create Admin</button>
+                    </div>
+                </form>
+            `;
+        openModal("Register New System Admin", formHtml);
+      }
+
+      function openImageModal(imgSrc) {
+        if (!imgSrc || imgSrc === window.location.href) return;
+        const imgModalOverlay = document.getElementById("imageModalOverlay");
+        const imgModalContent = document.getElementById("imageModalContent");
+        imgModalContent.src = imgSrc;
+        imgModalOverlay.classList.remove("hidden");
+        setTimeout(() => {
+          imgModalOverlay.classList.remove("opacity-0");
+          imgModalContent.classList.remove("scale-95");
+        }, 10);
+      }
+
+      function closeImageModal() {
+        const imgModalOverlay = document.getElementById("imageModalOverlay");
+        const imgModalContent = document.getElementById("imageModalContent");
+        imgModalOverlay.classList.add("opacity-0");
+        imgModalContent.classList.add("scale-95");
+        setTimeout(() => {
+          imgModalOverlay.classList.add("hidden");
+          imgModalContent.src = "";
+        }, 300);
+      }
+
+      // Add Escape key handler for drawer/modals
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") {
+          const imgModalOverlay = document.getElementById("imageModalOverlay");
+          const drawerOverlay = document.getElementById("drawerOverlay");
+          const adminDrawerOverlay =
+            document.getElementById("adminDrawerOverlay"); // Get admin drawer overlay
+
+          if (
+            imgModalOverlay &&
+            !imgModalOverlay.classList.contains("hidden")
+          ) {
+            closeImageModal();
+          } else if (
+            drawerOverlay &&
+            !drawerOverlay.classList.contains("hidden")
+          ) {
+            closeEmployeeDrawer();
+          } else if (
+            adminDrawerOverlay &&
+            !adminDrawerOverlay.classList.contains("hidden")
+          ) {
+            // Check for admin drawer
+            closeAdminDrawer();
+          }
+        }
+      });
+
+      // --- Credentials Modal Logic ---
+      let credentialsPostRoute = null; // Store route to navigate to after closing
+
+      function openCredentialsModal(
+        username,
+        password,
+        email,
+        targetRoute = null,
+      ) {
+        credentialsPostRoute = targetRoute;
+        document.getElementById("cred_username").innerText = username;
+        document.getElementById("cred_password").value = password;
+
+        // Set up email link
+        const emailBtn = document.getElementById("cred_email_btn");
+        if (email && email !== "N/A") {
+          const subject = encodeURIComponent(
+            "Your New Account Credentials - Yana Technologies",
+          );
+          const body = encodeURIComponent(
+            `Hello,\n\nYour new employee account has been created.\n\nUsername: ${username}\nTemporary Password: ${password}\n\nPlease log in and change your password immediately.\n\nRegards,\nYana Administration`,
+          );
+          emailBtn.href = `mailto:${email}?subject=${subject}&body=${body}`;
+          emailBtn.classList.remove("opacity-50", "pointer-events-none");
+        } else {
+          emailBtn.removeAttribute("href");
+          emailBtn.classList.add("opacity-50", "pointer-events-none");
+        }
+
+        const overlay = document.getElementById("credentialsModalOverlay");
+        const panel = document.getElementById("credentialsModalPanel");
+        overlay.classList.remove("hidden");
+        setTimeout(() => {
+          overlay.classList.remove("opacity-0");
+          panel.classList.remove("scale-95");
+        }, 10);
+
+        if (window.lucide) lucide.createIcons();
+      }
+
+      function closeCredentialsModal() {
+        const overlay = document.getElementById("credentialsModalOverlay");
+        const panel = document.getElementById("credentialsModalPanel");
+        overlay.classList.add("opacity-0");
+        panel.classList.add("scale-95");
+        setTimeout(() => {
+          overlay.classList.add("hidden");
+          document.getElementById("btnCopyCreds").innerHTML =
+            `<i data-lucide="copy" class="w-4 h-4"></i> Copy Password`;
+
+          // The background was already updated when the credentials modal opened.
+          // We just safely close this overlay now.
+          if (credentialsPostRoute) {
+            routeApp(credentialsPostRoute);
+            credentialsPostRoute = null;
+          }
+        }, 600);
+      }
+
+      function copyCredentialsToClipboard() {
+        const pwd = document.getElementById("cred_password").value;
+        navigator.clipboard
+          .writeText(pwd)
+          .then(() => {
+            const btn = document.getElementById("btnCopyCreds");
+            btn.innerHTML = `<i data-lucide="check" class="w-4 h-4 text-emerald-500"></i> <span class="text-emerald-600">Copied!</span>`;
+            setTimeout(() => {
+              btn.innerHTML = `<i data-lucide="copy" class="w-4 h-4"></i> Copy Password`;
+              if (window.lucide) lucide.createIcons();
+            }, 2000);
+          })
+          .catch((err) => {
+            showToast("Failed to copy", "error");
+          });
+      }
+
+      function togglePasswordVisibility() {
+        const pwdInput = document.getElementById("cred_password");
+        if (pwdInput.type === "password") {
+          pwdInput.type = "text";
+        } else {
+          pwdInput.type = "password";
+        }
+      }
+
+      let ws;
+      function setupWebSocket() {
+        if (
+          ws &&
+          (ws.readyState === WebSocket.OPEN ||
+            ws.readyState === WebSocket.CONNECTING)
+        )
+          return;
+        const wsUrl = CONFIG.API_BASE_URL.replace("http", "ws") + "/ws";
+        ws = new WebSocket(wsUrl);
+
+        ws.onopen = () =>
+          console.log("WebSocket connected for real-time updates");
+        ws.onmessage = async (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            if (data.action === "REFRESH_WORKSPACE") {
+              console.log(
+                "WebSocket update received. Performing silent refresh.",
+              );
+
+              // Silent data refresh
+              await loadAdminWorkspaceData();
+
+              if (state.adminView === "dashboard") {
+                await loadDashboardData();
+                if (state.isDailyReportVisible) {
+                  try {
+                    const data = await apiFetch("/dashboard/daily-report");
+                    state.dailyReportDataCache = data;
+                  } catch (e) {
+                    console.error("Silent daily report refresh failed:", e);
+                  }
+                }
+              }
+
+              if (state.activeProject) {
+                await openProjectDetails(state.activeProject.id);
+              } else {
+                // Background update: Re-render with new data cache
+                renderAdminApp();
+              }
+            }
+          } catch (e) {
+            console.error("Error processing websocket message", e);
+          }
+        };
+        ws.onclose = () => setTimeout(setupWebSocket, 3000);
+        ws.onerror = () => ws.close();
+      }
+
+      // Mobile & Desktop Sidebar Toggle Logic
+      window.toggleMobileSidebar = function () {
+        const sidebar = document.getElementById("main-sidebar");
+        const overlay = document.getElementById("mobile-sidebar-overlay");
+        if (!sidebar) return;
+
+        if (window.innerWidth < 768) {
+          if (!overlay) return;
+          const isOpen = !sidebar.classList.contains("-translate-x-full");
+          if (isOpen) {
+            // Close it
+            sidebar.classList.add("-translate-x-full");
+            overlay.classList.add("opacity-0");
+            setTimeout(() => overlay.classList.add("hidden"), 300);
+          } else {
+            // Open it
+            overlay.classList.remove("hidden");
+            // Small delay to allow display:block to apply before animating opacity
+            setTimeout(() => {
+              overlay.classList.remove("opacity-0");
+              sidebar.classList.remove("-translate-x-full");
+            }, 10);
+          }
+        } else {
+          // Desktop collapse
+          const isCollapsed = sidebar.classList.toggle("sidebar-collapsed");
+          localStorage.setItem(
+            "yanaSidebarCollapsed",
+            isCollapsed ? "true" : "false",
+          );
+
+          // Trigger window resize to auto-adjust charts
+          setTimeout(() => {
+            window.dispatchEvent(new Event("resize"));
+          }, 310);
+        }
+      };
+
+      // --- Bootstrap Application ---
+      document.addEventListener("DOMContentLoaded", async () => {
+        const token = sessionStorage.getItem(CONFIG.TOKEN_KEY);
+        const appDiv = document.getElementById("app");
+
+        if (!token) {
+          window.location.href = CONFIG.LOGIN_URL;
+          return;
+        }
+
+        state.user = parseJwt(token);
+
+        if (
+          !state.user ||
+          state.user.exp * 1000 < Date.now() ||
+          state.user.role.toLowerCase() !== "admin"
+        ) {
+          await customAlert(
+            "Session Error",
+            "Unauthorized or expired session. Redirecting to login.",
+          );
+          sessionStorage.removeItem(CONFIG.TOKEN_KEY);
+          window.location.href = CONFIG.LOGIN_URL;
+          return;
+        }
+
+        // Restore the last visited view and tab, or default to dashboard
+        const lastView = sessionStorage.getItem("lastAdminView") || "dashboard";
+        const lastTab =
+          sessionStorage.getItem("lastWorkforceTab") || "employees";
+
+        setupWebSocket();
+        routeApp(lastView, lastTab);
+      });
+      async function updateLeaveStatus(leaveId, status) {
+        const isConfirmed = await customConfirm(
+          "Update Leave Request",
+          `Are you sure you want to mark this leave request as ${status}?`,
+          status,
+          "Cancel",
+          status === "Rejected",
+        );
+        if (!isConfirmed) return;
+        try {
+          await apiFetch(`/attendance/leave-requests/${leaveId}/status`, {
+            method: "PUT",
+            body: { status: status },
+          });
+          showToast(
+            `Leave request ${status.toLowerCase()} successfully!`,
+            "success",
+          );
+          await loadAdminWorkspaceData();
+          routeApp("attendance", "leave");
+        } catch (error) {
+          showToast(
+            `Failed to update leave request: ${error.message}`,
+            "error",
+          );
+        }
+      }
+    

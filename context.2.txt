@@ -1,0 +1,71 @@
+  Codebase Integration and Quality Investigation:
+  Investigate the database operations and endpoints to ensure they correctly integrate with the database schema and identify any code quality issues or
+  data leaks.
+
+  ✓  ReadFile  src\database\database_operations.py
+  ✓  ReadFile  src\endpoints\projects.py
+  ✓  ReadFile  src\endpoints\employees.py
+  ✓  ReadFile  src\endpoints\auth.py
+  Codebase Investigation Report: Deliver a comprehensive investigation report based on the analysis of database tables, operations, and endpoints.
+
+
+✦ Here is the comprehensive investigation report based on an in-depth analysis of your database schema, database operations, and endpoint layers.
+
+  I have investigated the flow of data from the table definitions up through the FastAPI routers to ensure everything is tied up, checking for data leaks,
+  loose ends, bad code, and duplicate functions.
+
+  ---
+
+  1. Database Schema (database_tables.py)
+  Status: Solid structure, but minor cleanup needed.
+   * The Good: The tables are well-normalized using SQLAlchemy. Primary keys are correctly generated using uuid4(), which is secure and prevents ID
+     enumeration. Relationships and foreign keys are cleanly defined.
+   * The Loose End: In the Employees table, the column plain_password = Column(...) has been commented out (which is the correct security practice).
+     However, this creates a ripple effect in the operations file (see below).
+
+  2. Database Operations (database_operations.py)
+  Status: Highly functional, but contains a bug risk and architectural anti-patterns.
+   * Bug Risk / Bad Code: In the edit_employee function, there is this logic:
+
+   1     if key == "password":
+   2         employee.plain_password = value # <-- BUG RISK
+   3         value = get_password_hash(value)
+      Because plain_password was commented out in the tables file, assigning data to employee.plain_password dynamically adds an attribute to the Python
+  object but doesn't save it to the database. This is dead code and a bad practice.
+   * Unhandled Exception Risk: In check_in(), the code fetches the employee's name like this:
+
+   1     employee_name = session.query(Employees).filter_by(id=employee_id).first().full_name
+      If an invalid employee_id is passed, .first() returns None, and trying to access .full_name will trigger an AttributeError. This causes a hard crash
+  (500 Internal Error) instead of gracefully returning a "404 Employee Not Found".
+   * Architectural "Loose End" (Double Serialization): The functions in database_operations.py return json.dumps(...) (JSON strings) instead of native
+     Python dictionaries. The endpoints then receive these strings, parse them back into dictionaries using json.loads inside handle_response(), and FastAPI
+     turns them back into JSON for the client. This is a redundant double-serialization overhead.
+   * N+1 Query Performance Issue: In get_all_projects(), the system loops through every project and calls _calculate_project_progress() and
+     _calculate_payment_stats(). These functions trigger new database queries for every single project. If you have 100 projects, this runs 200+ database
+     queries instantly.
+
+  3. API Endpoints (src/endpoints/)
+  Status: Secure RBAC, but contains a critical security vulnerability.
+   * CRITICAL DATA LEAK / SECURITY FLAW: In src/endpoints/auth.py, the JWT encryption key is hardcoded directly in the file:
+
+   1     SECRET_KEY = "yana-super-secret-key-change-this-in-production"
+      If anyone gains read access to this file (or your GitHub repository), they can forge admin authentication tokens and bypass all passwords. This must
+  be moved to an .env file using os.getenv("SECRET_KEY").
+   * The Good (RBAC): Role-Based Access Control is handled very well. For example, employees.py intelligently checks if the user is a ManagerAdmin and
+     actively strips out sensitive financial data (salary, hourly_cost_rate) from the payload before sending it to the frontend.
+   * The Good (No Leakage): The system successfully protects passwords. When fetching users or admins, res_dict.pop('password', None) is consistently used
+     to ensure hashed passwords are never leaked to the frontend via the API.
+
+  ---
+
+  Summary & Recommendations
+
+  Overall, the codebase is structurally sound and functional, but it has a few "prototyping" artifacts that need to be cleaned up before production.
+
+  If you would like me to fix these issues, here is the plan I would execute:
+   1. Security Fix: Move the SECRET_KEY in auth.py to a secure environment variable.
+   2. Bug Fixes: Remove the dead plain_password assignment in database_operations.py and fix the AttributeError risk in the check_in function.
+   3. Performance Optimization: Refactor get_all_projects to use SQLAlchemy JOIN and aggregation functions to calculate progress and payments in a single
+      query rather than a loop.
+
+  Shall I proceed with fixing any of these identified loose ends?

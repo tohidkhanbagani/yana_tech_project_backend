@@ -1,0 +1,297 @@
+Yana OS - Render & State Fixes
+
+Follow these 4 exact find-and-replace steps in your admin.html file to fix the disappearing modals and the "Loading projects..." lock-up.
+
+STEP 1: Fix the renderAdminApp() Logic (Fixes the "Loading..." lock-up)
+
+We need to fix the logic that decides when to draw the tables.
+
+FIND this exact block (around line 386, right after the appDiv.innerHTML =  shell injection):
+
+            } else {
+                // ARCHITECTURE FIX: Shell exists. Just swap the inner content.
+                const dynamicArea = document.getElementById('dynamic-content-area');
+                if (dynamicArea) {
+                    dynamicArea.style.opacity = '0';
+                    setTimeout(() => {
+                        dynamicArea.innerHTML = contentHtml;
+                        dynamicArea.style.opacity = '1';
+
+                        // Dynamically update Header Text
+                        document.getElementById('header-title').innerText = state.adminView === 'dashboard' ? 'Executive Dashboard' : state.adminView.replace('-', ' ');
+
+                        // Re-initialize icons and charts for the new view
+                        if (window.lucide) lucide.createIcons();
+                        initChartsIfApplicable();
+                    }, 150); // 150ms smooth fade transition
+                }
+            }
+
+            // Dynamically highlight the active Sidebar Button
+            document.querySelectorAll('.nav-btn').forEach(btn => {
+                if (btn.getAttribute('data-view') === state.adminView) {
+                    btn.className = "nav-btn w-full flex items-center px-4 py-3 rounded-xl transition-all bg-brand-primary text-white shadow-md";
+                } else {
+                    btn.className = "nav-btn w-full flex items-center px-4 py-3 rounded-xl transition-all hover:bg-slate-800 hover:text-white text-slate-300";
+                }
+            });
+
+            // Initialize for first render
+            if (!state.appShellRendered || state.adminView === 'dashboard') {
+                if (window.lucide) lucide.createIcons();
+                initChartsIfApplicable();
+            }
+        }
+
+
+REPLACE IT WITH THIS:
+
+            } else {
+                // ARCHITECTURE FIX: Shell exists. Just swap the inner content.
+                const dynamicArea = document.getElementById('dynamic-content-area');
+                if (dynamicArea) {
+                    dynamicArea.style.opacity = '0';
+                    setTimeout(() => {
+                        dynamicArea.innerHTML = contentHtml;
+                        dynamicArea.style.opacity = '1';
+
+                        document.getElementById('header-title').innerText = state.adminView === 'dashboard' ? 'Executive Dashboard' : state.adminView.replace('-', ' ');
+
+                        document.querySelectorAll('.nav-btn').forEach(btn => {
+                            if (btn.getAttribute('data-view') === state.adminView) {
+                                btn.className = "nav-btn w-full flex items-center px-4 py-3 rounded-xl transition-all bg-brand-primary text-white shadow-md";
+                            } else {
+                                btn.className = "nav-btn w-full flex items-center px-4 py-3 rounded-xl transition-all hover:bg-slate-800 hover:text-white text-slate-300";
+                            }
+                        });
+
+                        if (window.lucide) lucide.createIcons();
+                        initChartsIfApplicable();
+                    }, 150);
+                    return; // EXIT EARLY so we don't double-trigger below
+                }
+            }
+
+            // This block ONLY runs on the true first render
+            document.querySelectorAll('.nav-btn').forEach(btn => {
+                if (btn.getAttribute('data-view') === state.adminView) {
+                    btn.className = "nav-btn w-full flex items-center px-4 py-3 rounded-xl transition-all bg-brand-primary text-white shadow-md";
+                } else {
+                    btn.className = "nav-btn w-full flex items-center px-4 py-3 rounded-xl transition-all hover:bg-slate-800 hover:text-white text-slate-300";
+                }
+            });
+
+            if (window.lucide) lucide.createIcons();
+            initChartsIfApplicable();
+        }
+
+
+STEP 2: Fix handleProjectSave() (Fixes the invisible project issue)
+
+We must implement Optimistic UI updates so the project appears instantly in the table.
+
+FIND this exact block inside handleProjectSave:
+
+            try {
+                // Execute Project Save
+                const response = await apiFetch(endpoint, { method, body: payload });
+                const savedProjectId = isEdit ? projectId : response.id; // API returns created object
+
+                // Execute SRS Link if provided
+                if (srsUrl) {
+                    btn.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 mr-2 animate-spin"></i> Linking SRS...';
+                    lucide.createIcons();
+                    
+                    const srsPayload = {
+                        project_id: savedProjectId,
+                        document_title: srsTitle || `${payload.name} Specifications`,
+                        version: srsVersion,
+                        file_url_or_path: srsUrl,
+                        status: "Approved"
+                    };
+                    
+                    // We ignore errors in SRS silently to not break the primary project creation, 
+                    // but we log it to console.
+                    await apiFetch('/projects/srs/create', { method: 'POST', body: srsPayload }).catch(e => console.warn('SRS Attach failed:', e));
+                }
+
+                showToast(`Project ${isEdit ? 'updated' : 'initialized'} successfully`, "success");
+                closeModal();
+                await loadAdminWorkspaceData();
+                renderAdminProjectsTable();
+            } catch (err) {
+
+
+REPLACE IT WITH THIS:
+
+            try {
+                // Execute Project Save
+                const response = await apiFetch(endpoint, { method, body: payload });
+                const savedProjectId = isEdit ? projectId : response.id; // API returns created object
+                
+                // INSTANT STATE UPDATE (Optimistic UI)
+                if (!isEdit) {
+                    state.allProjects.unshift(response);
+                } else {
+                    const idx = state.allProjects.findIndex(p => p.id === savedProjectId);
+                    if (idx !== -1) state.allProjects[idx] = response;
+                }
+
+                // Execute SRS Link if provided
+                if (srsUrl) {
+                    btn.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 mr-2 animate-spin"></i> Linking SRS...';
+                    lucide.createIcons();
+                    
+                    const srsPayload = {
+                        project_id: savedProjectId,
+                        document_title: srsTitle || `${payload.name} Specifications`,
+                        version: srsVersion,
+                        file_url_or_path: srsUrl,
+                        status: "Approved"
+                    };
+                    await apiFetch('/projects/srs/create', { method: 'POST', body: srsPayload }).catch(e => console.warn('SRS Attach failed:', e));
+                }
+
+                showToast(`Project ${isEdit ? 'updated' : 'initialized'} successfully`, "success");
+                closeModal();
+                
+                // Render instantly without re-fetching all system data
+                renderAdminProjectsTable();
+            } catch (err) {
+
+
+STEP 3: Fix handleAdminCreateEntity() (Fixes background data logic)
+
+We need to ensure employee creation updates the background state before the credentials modal pops up.
+
+FIND the try block inside handleAdminCreateEntity() (around line 1024):
+
+            try {
+                const response = await apiFetch(endpoint, { method: methodOverride, body: payload });
+                
+                if (response.generated_password) {
+                    openCredentialsModal(response.username, response.generated_password, payload.email || response.email, refreshView);
+                } else {
+                    if (!endpoint.includes('/update/')) {
+                        showToast("Record created successfully!", "success");
+                        
+                        // ARCHITECTURE FIX: Push directly to local state instead of reloading everything
+                        if (refreshView === 'workforce') {
+                            if (endpoint.includes('/employees/')) state.allEmployees.unshift(response);
+                            if (endpoint.includes('/admins/')) state.allAdmins.unshift(response);
+                            if (endpoint.includes('/roles/')) state.allRoles.unshift(response);
+                        } else if (refreshView === 'projects') {
+                            state.allProjects.unshift(response);
+                        }
+                    } else {
+                        showToast("Record updated successfully!", "success");
+                        
+                        // ARCHITECTURE FIX: Update local state directly
+                        if (refreshView === 'workforce' && endpoint.includes('/employees/update/')) {
+                            const idx = state.allEmployees.findIndex(e => e.id === response.id);
+                            if (idx !== -1) state.allEmployees[idx] = response;
+                        } else if (refreshView === 'projects' && endpoint.includes('/projects/update/')) {
+                            const idx = state.allProjects.findIndex(p => p.id === response.id);
+                            if (idx !== -1) state.allProjects[idx] = response;
+                        }
+                    }
+                    
+                    closeModal();
+                    
+                    // If we edited an employee while the drawer is open, refresh the drawer visually
+                    if (endpoint.includes('/employees/update/') && !document.getElementById('drawerOverlay').classList.contains('hidden')) {
+                        const idPart = endpoint.split('/').pop();
+                        if(idPart) openEmployeeDrawer(idPart);
+                    }
+                    
+                    // Just re-render the view, don't fetch data again
+                    routeApp(refreshView);
+                }
+            } catch (error) {
+
+
+REPLACE IT WITH THIS:
+
+            try {
+                const response = await apiFetch(endpoint, { method: methodOverride, body: payload });
+                
+                // ALWAYS UPDATE STATE INSTANTLY
+                if (!endpoint.includes('/update/')) {
+                    if (refreshView === 'workforce') {
+                        if (endpoint.includes('/employees/')) state.allEmployees.unshift(response);
+                        if (endpoint.includes('/admins/')) state.allAdmins.unshift(response);
+                        if (endpoint.includes('/roles/')) state.allRoles.unshift(response);
+                    } else if (refreshView === 'projects') {
+                        state.allProjects.unshift(response);
+                    }
+                } else {
+                    if (refreshView === 'workforce' && endpoint.includes('/employees/update/')) {
+                        const idx = state.allEmployees.findIndex(e => e.id === response.id);
+                        if (idx !== -1) state.allEmployees[idx] = response;
+                    } else if (refreshView === 'projects' && endpoint.includes('/projects/update/')) {
+                        const idx = state.allProjects.findIndex(p => p.id === response.id);
+                        if (idx !== -1) state.allProjects[idx] = response;
+                    }
+                }
+
+                if (response.generated_password) {
+                    openCredentialsModal(response.username, response.generated_password, payload.email || response.email, refreshView);
+                } else {
+                    showToast(`Record ${endpoint.includes('/update/') ? 'updated' : 'created'} successfully!`, "success");
+                    closeModal();
+                    
+                    if (endpoint.includes('/employees/update/') && !document.getElementById('drawerOverlay').classList.contains('hidden')) {
+                        const idPart = endpoint.split('/').pop();
+                        if(idPart) openEmployeeDrawer(idPart);
+                    }
+                    routeApp(refreshView);
+                }
+            } catch (error) {
+
+
+STEP 4: Fix closeCredentialsModal() (Prevents the aggressive flash/reload)
+
+Now that the state is updated instantly in Step 3, we don't want the modal closure to force a massive database refetch.
+
+FIND this exact code (near the very bottom, around line 1445):
+
+        function closeCredentialsModal() {
+            const overlay = document.getElementById('credentialsModalOverlay');
+            const panel = document.getElementById('credentialsModalPanel');
+            overlay.classList.add('opacity-0');
+            panel.classList.add('scale-95');
+            setTimeout(async () => {
+                overlay.classList.add('hidden');
+                document.getElementById('btnCopyCreds').innerHTML = `<i data-lucide="copy" class="w-4 h-4"></i> Copy Password`;
+                
+                closeModal(); // Ensure original creation modal is closed
+                await loadAdminWorkspaceData();
+                if(credentialsPostRoute) {
+                     routeApp(credentialsPostRoute);
+                     credentialsPostRoute = null;
+                }
+            }, 300);
+        }
+
+
+REPLACE IT WITH THIS:
+
+        function closeCredentialsModal() {
+            const overlay = document.getElementById('credentialsModalOverlay');
+            const panel = document.getElementById('credentialsModalPanel');
+            overlay.classList.add('opacity-0');
+            panel.classList.add('scale-95');
+            setTimeout(() => {
+                overlay.classList.add('hidden');
+                document.getElementById('btnCopyCreds').innerHTML = `<i data-lucide="copy" class="w-4 h-4"></i> Copy Password`;
+                
+                closeModal(); // Ensure original creation modal is closed
+                
+                // Do NOT await loadAdminWorkspaceData() here to prevent flashing. 
+                // The local state was already updated optimistically.
+                if(credentialsPostRoute) {
+                     routeApp(credentialsPostRoute);
+                     credentialsPostRoute = null;
+                }
+            }, 300);
+        }
