@@ -683,9 +683,9 @@ def get_v2_dashboard_summary(current_user: dict = Depends(get_current_user)):
             # Helper for monthly aggregation
             def get_monthly_stats(model, date_col, amount_col):
                 return session.query(
-                    func.strftime('%m', date_col).label('month'),
+                    func.extract('month', date_col).label('month'),
                     func.sum(amount_col).label('total')
-                ).filter(func.strftime('%Y', date_col) == str(current_year))\
+                ).filter(func.extract('year', date_col) == current_year)\
                  .group_by('month').all()
 
             monthly_rev_dev = get_monthly_stats(DeveloperTasks, DeveloperTasks.date, DeveloperTasks.billing_amount)
