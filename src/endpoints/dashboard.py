@@ -559,7 +559,7 @@ def get_analytics_suite(current_user: dict = Depends(get_current_user)):
                 func.sum(case((ProjectTimeline.status.ilike('%completed%'), 1), else_=0)).label('completed')
             ).group_by(ProjectTimeline.project_id).all()}
 
-            # --- 1. COMPUTE METRICS ---
+            # --- 1. COMPUTE METRICS --- 
             project_health = []
             profitability = []
             alerts = []
