@@ -1,45 +1,21 @@
-# Python stuff
-__pycache__/
-*.py[cod]
-*$py.class
-.venv/
-venv/
-env/
-frontend/
-src/database/database_testing.ipynb
-testing.ipynb
-seed_admin.py
-# Database & Data (IMPORTANT: Don't upload your local test data)
-data/database/
-*.db
-*.sqlite3
-dump/
-big_change_backup/
+# Ignore everything at the root level by default
+/*
 
-# src/database/database_create.py
-# data/images/
-data/uploads/
+# Allow .gitignore itself to be tracked
+!.gitignore
 
-# Environment/Config
-.env
-ngrok.yml
+# Allow the specific required files and directories
+!src/
+!requirements.txt
+!schemas.py
+!main.py
 
-context.txt
-context2.txt
-scratch
-.docx
-.pdf
-.js
-.ipynb
-.csv
-.xlsx
+# Ignore Python cache/compiled files inside allowed directories
+**/__pycache__/
+**/*.py[cod]
+**/*$py.class
 
-# OS stuff
-.DS_Store
-Thumbs.db
-
-frontend_2/                                                                                                                                     │
-# IDE stuff                                                                                                                                     │
-.vscode/                                                                                                                                        │
-.idea/                                                                                                                                                 │
-platform_frontend/                                                                                                                              │
+# Ignore specific development/testing files inside allowed directories
+**/*.ipynb
+**/*.db
+**/*.sqlite3
