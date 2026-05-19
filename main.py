@@ -73,7 +73,6 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://yana-tech-project-frontend.vercel.app",
         "https://yana-frontend.vercel.app",
         "http://localhost:3000",
         "http://localhost:5500",
