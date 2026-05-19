@@ -17,6 +17,9 @@ if dotenv_path.exists():
 DATABASE_URL = os.getenv("DIRECT_URL") or os.getenv("DATABASE_URL")
 
 if DATABASE_URL:
+    # Strip any accidental whitespace or quotes that might have been pasted into the Render dashboard
+    DATABASE_URL = DATABASE_URL.strip().strip('"').strip("'")
+    
     # Check if the database URL has the password placeholder
     if "[YOUR-PASSWORD]" in DATABASE_URL:
         print("\n" + "="*80)
