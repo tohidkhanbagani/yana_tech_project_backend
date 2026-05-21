@@ -19,3 +19,8 @@
 **/*.ipynb
 **/*.db
 **/*.sqlite3
+
+# Specific Files
+src/database/database_create_production.py
+platform_frontend/
+frontend_2/
