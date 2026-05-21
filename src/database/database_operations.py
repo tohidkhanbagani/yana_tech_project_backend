@@ -17,7 +17,8 @@ from .database_create import SessionLocal
 from .database_tables import (
     Departments_Roles, Admins, Employees, LoginHistory, Managers,
     Projects, SRS_Documents, ProjectTimeline, ProjectAssignments, MilestoneAssignments,
-    DeveloperTasks, ContentCreatorTasks, ProjectExpenses, Attendance, LeaveRequest, ProjectPayments
+    DeveloperTasks, ContentCreatorTasks, ProjectExpenses, Attendance, LeaveRequest, ProjectPayments,
+    ChecklistTemplate, ProjectChecklistState
 )
 # ==========================================
 #              LOGGING SETUP
@@ -282,6 +283,49 @@ class DatabaseOperations:
                 if not employee_id:
                     return json.dumps({"error": "employee_id is required for Developer Tasks."})
                 
+                # --- ATTENDANCE CHECK-IN/CHECK-OUT ENFORCEMENT ---
+                task_date_val = data.get("date")
+                if not task_date_val:
+                    task_date = datetime.now()
+                elif isinstance(task_date_val, datetime):
+                    task_date = task_date_val
+                elif hasattr(task_date_val, "date"):
+                    task_date = datetime.combine(task_date_val, datetime.min.time())
+                elif isinstance(task_date_val, str):
+                    parsed = None
+                    for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+                        try:
+                            parsed = datetime.strptime(task_date_val.split("+")[0].split("Z")[0], fmt)
+                            break
+                        except ValueError:
+                            continue
+                    if parsed is None:
+                        try:
+                            parsed = datetime.fromisoformat(task_date_val)
+                        except ValueError:
+                            pass
+                    task_date = parsed if parsed is not None else datetime.now()
+                else:
+                    task_date = datetime.now()
+
+                # Normalize to date to perform date.between check
+                task_cal_date = task_date.date()
+                start_of_day = datetime.combine(task_cal_date, datetime.min.time())
+                end_of_day = datetime.combine(task_cal_date, datetime.max.time())
+
+                attendance = session.query(Attendance).filter(
+                    Attendance.employee_id == employee_id,
+                    Attendance.date.between(start_of_day, end_of_day)
+                ).first()
+
+                if not attendance:
+                    return json.dumps({"error": "Access Denied: You must check in before logging any tasks."})
+                if attendance.check_out_time is not None:
+                    return json.dumps({"error": "Access Denied: You cannot log tasks after checking out."})
+
+                # Store the parsed datetime in data
+                data["date"] = task_date
+
                 # --- PHASE 5: ADVANCED FINANCIAL AUTO-CALCULATION ---
                 employee = session.query(Employees).filter_by(id=employee_id).first()
                 if not employee:
@@ -312,13 +356,6 @@ class DatabaseOperations:
                 # Save Task
                 new_task = DeveloperTasks(**data)
                 session.add(new_task)
-                
-                # Check and update project status if it's currently 'Planning'
-                if project_id:
-                    project = session.query(Projects).filter_by(id=project_id).first()
-                    if project and project.status == 'Planning':
-                        project.status = 'In Progress'
-                        logger.info(f"Project {project_id} status updated to 'In Progress' due to new developer task.")
                 
                 # Check and update milestone status and actual_start date
                 milestone_id = data.get("milestone_id")
@@ -353,6 +390,49 @@ class DatabaseOperations:
                 employee_id = data.get("employee_id")
                 if not employee_id:
                     return json.dumps({"error": "employee_id is required for Content Tasks."})
+
+                # --- ATTENDANCE CHECK-IN/CHECK-OUT ENFORCEMENT ---
+                task_date_val = data.get("date")
+                if not task_date_val:
+                    task_date = datetime.now()
+                elif isinstance(task_date_val, datetime):
+                    task_date = task_date_val
+                elif hasattr(task_date_val, "date"):
+                    task_date = datetime.combine(task_date_val, datetime.min.time())
+                elif isinstance(task_date_val, str):
+                    parsed = None
+                    for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+                        try:
+                            parsed = datetime.strptime(task_date_val.split("+")[0].split("Z")[0], fmt)
+                            break
+                        except ValueError:
+                            continue
+                    if parsed is None:
+                        try:
+                            parsed = datetime.fromisoformat(task_date_val)
+                        except ValueError:
+                            pass
+                    task_date = parsed if parsed is not None else datetime.now()
+                else:
+                    task_date = datetime.now()
+
+                # Normalize to date to perform date.between check
+                task_cal_date = task_date.date()
+                start_of_day = datetime.combine(task_cal_date, datetime.min.time())
+                end_of_day = datetime.combine(task_cal_date, datetime.max.time())
+
+                attendance = session.query(Attendance).filter(
+                    Attendance.employee_id == employee_id,
+                    Attendance.date.between(start_of_day, end_of_day)
+                ).first()
+
+                if not attendance:
+                    return json.dumps({"error": "Access Denied: You must check in before logging any tasks."})
+                if attendance.check_out_time is not None:
+                    return json.dumps({"error": "Access Denied: You cannot log tasks after checking out."})
+
+                # Store the parsed datetime in data
+                data["date"] = task_date
 
                 # --- PHASE 5: ADVANCED FINANCIAL AUTO-CALCULATION ---
                 employee = session.query(Employees).filter_by(id=employee_id).first()
@@ -392,13 +472,6 @@ class DatabaseOperations:
                 new_task = ContentCreatorTasks(**data)
                 session.add(new_task)
                 
-                # Check and update project status if it's currently 'Planning'
-                if project_id:
-                    project = session.query(Projects).filter_by(id=project_id).first()
-                    if project and project.status == 'Planning':
-                        project.status = 'In Progress'
-                        logger.info(f"Project {project_id} status updated to 'In Progress' due to new content task.")
-                        
                 # Check and update milestone status and actual_start date
                 milestone_id = data.get("milestone_id")
                 if milestone_id:
@@ -808,6 +881,7 @@ class DatabaseOperations:
                 log_entry = LoginHistory(
                     user_id=user_id,
                     user_role=user_role,
+                    login_timestamp=datetime.utcnow(),  # Record login timestamps in UTC!
                     ip_address=ip_address,
                     user_agent=user_agent
                 )
@@ -818,6 +892,58 @@ class DatabaseOperations:
                 session.rollback()
                 # We do not return JSON here because this is called passively during login flows.
                 logger.error(f"Failed to log login history for user {user_id}: {str(e)}", exc_info=True)
+
+    def parse_user_agent(self, user_agent: str) -> tuple:
+        """Parses user agent to return a tuple of (browser, device/OS) as human-readable strings."""
+        if not user_agent or user_agent == "Unknown":
+            return "Unknown", "Unknown"
+        
+        ua = user_agent.lower()
+        
+        # Determine OS / Device
+        if "windows phone" in ua:
+            device = "Windows Phone"
+        elif "win" in ua:
+            if "nt 10.0" in ua:
+                device = "Windows 10/11"
+            elif "nt 6.3" in ua:
+                device = "Windows 8.1"
+            elif "nt 6.2" in ua:
+                device = "Windows 8"
+            elif "nt 6.1" in ua:
+                device = "Windows 7"
+            else:
+                device = "Windows"
+        elif "android" in ua:
+            device = "Android Device"
+        elif "ipad" in ua:
+            device = "iPad"
+        elif "iphone" in ua:
+            device = "iPhone"
+        elif "mac" in ua:
+            device = "macOS"
+        elif "linux" in ua:
+            device = "Linux"
+        else:
+            device = "Other Device"
+            
+        # Determine Browser
+        if "edg" in ua:
+            browser = "Microsoft Edge"
+        elif "chrome" in ua or "crios" in ua:
+            browser = "Google Chrome"
+        elif "safari" in ua:
+            browser = "Apple Safari"
+        elif "firefox" in ua or "fxios" in ua:
+            browser = "Mozilla Firefox"
+        elif "opr" in ua or "opera" in ua:
+            browser = "Opera"
+        elif "msie" in ua or "trident" in ua:
+            browser = "Internet Explorer"
+        else:
+            browser = "Other Browser"
+            
+        return browser, device
 
     # ==========================================
     #     REMAINING CRUD OPERATIONS (PHASE 2)
@@ -886,12 +1012,568 @@ class DatabaseOperations:
             except Exception as e:
                 return self._handle_error("get_project", e)
 
+    def export_project_csv_data(self, project_id: str) -> Optional[str]:
+        import csv
+        import io
+        
+        with self.SessionLocal() as session:
+            try:
+                # 1. Fetch core project details
+                proj = session.query(Projects).filter_by(id=project_id).first()
+                if not proj:
+                    return None
+                
+                # Fetch related data
+                # Assignments
+                assignments = session.query(ProjectAssignments, Employees, Departments_Roles).join(
+                    Employees, ProjectAssignments.employee_id == Employees.id
+                ).outerjoin(
+                    Departments_Roles, Employees.role_id == Departments_Roles.id
+                ).filter(ProjectAssignments.project_id == project_id).all()
+                
+                # Timeline
+                timeline = session.query(ProjectTimeline).filter_by(project_id=project_id).order_by(ProjectTimeline.expected_start).all()
+                
+                # Payments
+                payments = session.query(ProjectPayments).filter_by(project_id=project_id).order_by(ProjectPayments.payment_date.desc()).all()
+                
+                # Expenses
+                expenses = session.query(ProjectExpenses).filter_by(project_id=project_id).order_by(ProjectExpenses.expense_date.desc()).all()
+                
+                # Developer Tasks
+                dev_tasks = session.query(DeveloperTasks, Employees).join(
+                    Employees, DeveloperTasks.employee_id == Employees.id
+                ).filter(DeveloperTasks.project_id == project_id).order_by(DeveloperTasks.date.desc()).all()
+                
+                # Content Creator Tasks
+                content_tasks = session.query(ContentCreatorTasks, Employees).join(
+                    Employees, ContentCreatorTasks.employee_id == Employees.id
+                ).filter(ContentCreatorTasks.project_id == project_id).order_by(ContentCreatorTasks.date.desc()).all()
+                
+                # Checklist items
+                checklists = session.query(ProjectChecklistState, ChecklistTemplate).join(
+                    ChecklistTemplate, ProjectChecklistState.checklist_id == ChecklistTemplate.id
+                ).filter(ProjectChecklistState.project_id == project_id).all()
+                
+                # SRS
+                srs_docs = session.query(SRS_Documents).filter_by(project_id=project_id).order_by(SRS_Documents.created_at.desc()).all()
+                
+                # Setup CSV writer
+                output = io.StringIO()
+                writer = csv.writer(output, lineterminator='\n')
+                
+                # --- SECTION 1: PROJECT METADATA ---
+                writer.writerow(["=== PROJECT METADATA ==="])
+                writer.writerow([
+                    "Project ID", "Project Name", "Project Type", "Description", "Status",
+                    "Client Cost", "Budget", "Approx Cost", "Cost Type", "Start Date",
+                    "End Date", "Progress", "Manager", "Client Name", "Team", 
+                    "Referred By", "Filled By", "Assigned To", "Created At", "Updated At"
+                ])
+                writer.writerow([
+                    proj.id, proj.name, proj.project_type, proj.description, proj.status,
+                    proj.client_cost, proj.budget, proj.approx_cost, proj.cost_type, proj.start_date,
+                    proj.end_date, self._calculate_project_progress(session, proj), proj.manager, proj.client, proj.team,
+                    proj.referred_by, proj.filled_by, proj.assigned_to, proj.created_at, proj.updated_at
+                ])
+                writer.writerow([]) # Empty spacer
+                
+                # --- SECTION 2: ASSIGNED TEAM MEMBERS ---
+                writer.writerow(["=== ASSIGNED TEAM MEMBERS ==="])
+                writer.writerow([
+                    "Employee ID", "Full Name", "Email", "Role/Job Title", 
+                    "Standard Cost Rate", "Standard Billing Rate", "Custom Cost Override", "Custom Billing Override", "Assigned At"
+                ])
+                if assignments:
+                    for assign, emp, role in assignments:
+                        writer.writerow([
+                            emp.id, emp.full_name, emp.email, role.role_name if role else "Employee",
+                            emp.hourly_cost_rate, emp.hourly_billing_rate, assign.custom_hourly_cost, assign.custom_hourly_billing, assign.assigned_at
+                        ])
+                else:
+                    writer.writerow(["No team members assigned."])
+                writer.writerow([])
+                
+                # --- SECTION 3: PROJECT TIMELINE & MILESTONES ---
+                writer.writerow(["=== PROJECT TIMELINE & MILESTONES ==="])
+                writer.writerow([
+                    "Milestone ID", "Milestone Name", "Expected Start", "Expected End", 
+                    "Actual Start", "Actual End", "Status", "Remarks", "Created At"
+                ])
+                if timeline:
+                    for t in timeline:
+                        writer.writerow([
+                            t.id, t.milestone_name, t.expected_start, t.expected_end,
+                            t.actual_start, t.actual_end, t.status, t.remarks, t.created_at
+                        ])
+                else:
+                    writer.writerow(["No timeline milestones defined."])
+                writer.writerow([])
+                
+                # --- SECTION 4: CLIENT PAYMENT HISTORY ---
+                writer.writerow(["=== CLIENT PAYMENT HISTORY ==="])
+                writer.writerow([
+                    "Payment ID", "Amount", "Payment Date", "Payment Method", "Reference Number", "Remarks", "Logged At"
+                ])
+                if payments:
+                    for p in payments:
+                        writer.writerow([
+                            p.id, p.amount, p.payment_date, p.payment_method, p.reference_number, p.remarks, p.created_at
+                        ])
+                else:
+                    writer.writerow(["No client payments logged."])
+                writer.writerow([])
+                
+                # --- SECTION 5: PROJECT EXPENSES ---
+                writer.writerow(["=== PROJECT EXPENSES ==="])
+                writer.writerow([
+                    "Expense ID", "Expense Name", "Amount", "Expense Date", "Description", "Logged At"
+                ])
+                if expenses:
+                    for e in expenses:
+                        writer.writerow([
+                            e.id, e.expense_name, e.amount, e.expense_date, e.description, e.created_at
+                        ])
+                else:
+                    writer.writerow(["No project expenses logged."])
+                writer.writerow([])
+                
+                # --- SECTION 6: DEVELOPER TIMESHEETS ---
+                writer.writerow(["=== DEVELOPER TIMESHEETS ==="])
+                writer.writerow([
+                    "Task ID", "Employee Name", "Date Logged", "Hours Logged", "Tech Stack Used", 
+                    "GitHub Link", "Task Performed", "Tomorrow's Plan", "Employee Cost", "Billing Amount", "Profit/Loss", "Logged At"
+                ])
+                if dev_tasks:
+                    for dt, emp in dev_tasks:
+                        writer.writerow([
+                            dt.id, emp.full_name, dt.date, dt.hours_logged, dt.tech_stack,
+                            dt.github_link, dt.task_performed, dt.tomorrow_plan, dt.employee_cost, dt.billing_amount, dt.profit_loss, dt.created_at
+                        ])
+                else:
+                    writer.writerow(["No developer tasks logged."])
+                writer.writerow([])
+                
+                # --- SECTION 7: CONTENT CREATOR TIMESHEETS ---
+                writer.writerow(["=== CONTENT CREATOR TIMESHEETS ==="])
+                writer.writerow([
+                    "Task ID", "Employee Name", "Date Logged", "Hours Logged", "Reels Count", "Long Video Count",
+                    "Poster Count", "Calls Made", "Platform", "Total Content", "Task Performed", 
+                    "Employee Cost", "Billing Amount", "Profit/Loss", "Logged At"
+                ])
+                if content_tasks:
+                    for ct, emp in content_tasks:
+                        writer.writerow([
+                            ct.id, emp.full_name, ct.date, ct.hours_logged, ct.reels_count, ct.long_video_count,
+                            ct.poster_count, ct.calls_made, ct.platform, ct.total_content, ct.task_performed,
+                            ct.employee_cost, ct.billing_amount, ct.profit_loss, ct.created_at
+                        ])
+                else:
+                    writer.writerow(["No content creator tasks logged."])
+                writer.writerow([])
+                
+                # --- SECTION 8: GATEKEEPER CHECKLIST ---
+                writer.writerow(["=== GATEKEEPER CHECKLIST ==="])
+                writer.writerow([
+                    "Checklist Item ID", "Phase", "Task Description", "Completed State", "Last Updated"
+                ])
+                if checklists:
+                    for state_item, template in checklists:
+                        writer.writerow([
+                            state_item.id, template.phase, template.task_description, 
+                            "Checked" if state_item.is_checked else "Pending", state_item.updated_at
+                        ])
+                else:
+                    writer.writerow(["No gatekeeper checklists initialized."])
+                writer.writerow([])
+                
+                # --- SECTION 9: SRS & PROJECT DOCUMENTS ---
+                writer.writerow(["=== SRS & PROJECT DOCUMENTS ==="])
+                writer.writerow([
+                    "Document ID", "Title", "Version", "File URL / Path", "Approval Status", "Approved By", "Uploaded At"
+                ])
+                if srs_docs:
+                    for doc in srs_docs:
+                        writer.writerow([
+                            doc.id, doc.document_title, doc.version, doc.file_url_or_path, doc.status, doc.approved_by, doc.created_at
+                        ])
+                else:
+                    writer.writerow(["No SRS documents linked."])
+                
+                return output.getvalue()
+            except Exception as e:
+                return self._handle_error("export_project_csv_data", e, context={"project_id": project_id})
+
+    def export_project_xlsx_data(self, project_id: str) -> Optional[bytes]:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+        import io
+        from datetime import datetime, date
+
+        def fmt_dt(val) -> str:
+            if not val:
+                return "N/A"
+            if isinstance(val, str):
+                return val
+            try:
+                return val.strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                return str(val)
+
+        def fmt_date(val) -> str:
+            if not val:
+                return "N/A"
+            if isinstance(val, str):
+                return val
+            try:
+                return val.strftime("%Y-%m-%d")
+            except Exception:
+                return str(val)
+        
+        with self.SessionLocal() as session:
+            try:
+                # 1. Fetch core project details
+                proj = session.query(Projects).filter_by(id=project_id).first()
+                if not proj:
+                    return None
+                
+                # Fetch related data
+                # Assignments
+                assignments = session.query(ProjectAssignments, Employees, Departments_Roles).join(
+                    Employees, ProjectAssignments.employee_id == Employees.id
+                ).outerjoin(
+                    Departments_Roles, Employees.role_id == Departments_Roles.id
+                ).filter(ProjectAssignments.project_id == project_id).all()
+                
+                # Timeline
+                timeline = session.query(ProjectTimeline).filter_by(project_id=project_id).order_by(ProjectTimeline.expected_start).all()
+                
+                # Payments
+                payments = session.query(ProjectPayments).filter_by(project_id=project_id).order_by(ProjectPayments.payment_date.desc()).all()
+                
+                # Expenses
+                expenses = session.query(ProjectExpenses).filter_by(project_id=project_id).order_by(ProjectExpenses.expense_date.desc()).all()
+                
+                # Developer Tasks
+                dev_tasks = session.query(DeveloperTasks, Employees).join(
+                    Employees, DeveloperTasks.employee_id == Employees.id
+                ).filter(DeveloperTasks.project_id == project_id).order_by(DeveloperTasks.date.desc()).all()
+                
+                # Content Creator Tasks
+                content_tasks = session.query(ContentCreatorTasks, Employees).join(
+                    Employees, ContentCreatorTasks.employee_id == Employees.id
+                ).filter(ContentCreatorTasks.project_id == project_id).order_by(ContentCreatorTasks.date.desc()).all()
+                
+                # Checklist items
+                checklists = session.query(ProjectChecklistState, ChecklistTemplate).join(
+                    ChecklistTemplate, ProjectChecklistState.checklist_id == ChecklistTemplate.id
+                ).filter(ProjectChecklistState.project_id == project_id).all()
+                
+                # SRS
+                srs_docs = session.query(SRS_Documents).filter_by(project_id=project_id).order_by(SRS_Documents.created_at.desc()).all()
+
+                # Build openpyxl Workbook
+                wb = Workbook()
+                # Remove default sheet
+                default_sheet = wb.active
+                wb.remove(default_sheet)
+
+                # Styles
+                header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+                header_fill = PatternFill(start_color="4F46E5", end_color="4F46E5", fill_type="solid") # brand indigo
+                header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                
+                data_font = Font(name="Calibri", size=11)
+                italic_font = Font(name="Calibri", size=11, italic=True, color="7F7F7F")
+                
+                border_thin = Side(border_style="thin", color="D1D5DB")
+                cell_border = Border(left=border_thin, right=border_thin, top=border_thin, bottom=border_thin)
+
+                left_align = Alignment(horizontal="left", vertical="center")
+                center_align = Alignment(horizontal="center", vertical="center")
+                right_align = Alignment(horizontal="right", vertical="center")
+
+                # Helper to write sheet
+                def write_sheet(title: str, headers: List[str], rows: List[List[Any]], column_alignments: List[Alignment] = None, numeric_formats: Dict[int, str] = None):
+                    ws = wb.create_sheet(title=title)
+                    ws.views.sheetView[0].showGridLines = True
+                    
+                    # Write Headers
+                    ws.append(headers)
+                    for col_num in range(1, len(headers) + 1):
+                        cell = ws.cell(row=1, column=col_num)
+                        cell.font = header_font
+                        cell.fill = header_fill
+                        cell.alignment = header_alignment
+                        cell.border = cell_border
+                    
+                    # Write Data
+                    if rows:
+                        for r_idx, row in enumerate(rows, start=2):
+                            ws.append(row)
+                            for col_idx, val in enumerate(row, start=1):
+                                cell = ws.cell(row=r_idx, column=col_idx)
+                                cell.font = data_font
+                                cell.border = cell_border
+                                
+                                # Alignments
+                                if column_alignments and col_idx - 1 < len(column_alignments):
+                                    cell.alignment = column_alignments[col_idx - 1]
+                                else:
+                                    cell.alignment = left_align
+                                    
+                                # Number Formats
+                                if numeric_formats and (col_idx - 1) in numeric_formats:
+                                    cell.number_format = numeric_formats[col_idx - 1]
+                    else:
+                        # Write standard placeholder
+                        placeholder = ["No recorded database entries for this section."] + [""] * (len(headers) - 1)
+                        ws.append(placeholder)
+                        for col_idx in range(1, len(headers) + 1):
+                            cell = ws.cell(row=2, column=col_idx)
+                            cell.font = italic_font
+                            cell.border = cell_border
+                            cell.alignment = left_align
+                    
+                    # Adjust column widths
+                    for col in ws.columns:
+                        max_len = 0
+                        for cell in col:
+                            if cell.value:
+                                val_str = str(cell.value)
+                                if len(val_str) > max_len:
+                                    max_len = len(val_str)
+                        col_letter = get_column_letter(col[0].column)
+                        ws.column_dimensions[col_letter].width = max(max_len + 3, 12)
+
+                # 1. Project Metadata
+                proj_headers = [
+                    "Project ID", "Project Name", "Project Type", "Description", "Status",
+                    "Client Cost", "Budget", "Approx Cost", "Cost Type", "Start Date",
+                    "End Date", "Progress", "Manager", "Client Name", "Team", 
+                    "Referred By", "Filled By", "Assigned To", "Created At", "Updated At"
+                ]
+                # Format Dates/Times
+                start_date_str = fmt_date(proj.start_date)
+                end_date_str = fmt_date(proj.end_date)
+                created_at_str = fmt_dt(proj.created_at)
+                updated_at_str = fmt_dt(proj.updated_at)
+                
+                proj_rows = [[
+                    proj.id, proj.name, proj.project_type, proj.description or "N/A", proj.status,
+                    proj.client_cost or 0.0, proj.budget or 0.0, proj.approx_cost or 0.0, proj.cost_type or "N/A", start_date_str,
+                    end_date_str, f"{self._calculate_project_progress(session, proj)}%", proj.manager or "N/A", proj.client or "N/A", proj.team or "N/A",
+                    proj.referred_by or "N/A", proj.filled_by or "N/A", proj.assigned_to or "N/A", created_at_str, updated_at_str
+                ]]
+                
+                # Alignments: ID(C), Name(L), Type(C), Desc(L), Status(C), ClientCost(R), Budget(R), ApproxCost(R), CostType(C), Dates(C), Progress(C), etc.
+                proj_alignments = [
+                    center_align, left_align, center_align, left_align, center_align,
+                    right_align, right_align, right_align, center_align, center_align,
+                    center_align, center_align, left_align, left_align, left_align,
+                    left_align, left_align, left_align, center_align, center_align
+                ]
+                # Numeric Formats: Client Cost (index 5), Budget (index 6), Approx Cost (index 7)
+                proj_formats = {5: "₹#,##0.00", 6: "₹#,##0.00", 7: "₹#,##0.00"}
+                
+                write_sheet("Project Metadata", proj_headers, proj_rows, proj_alignments, proj_formats)
+
+                # 2. Assigned Team Members
+                team_headers = [
+                    "Employee ID", "Full Name", "Email", "Role/Job Title", 
+                    "Standard Cost Rate", "Standard Billing Rate", "Custom Cost Override", "Custom Billing Override", "Assigned At"
+                ]
+                team_rows = []
+                for assign, emp, role in assignments:
+                    assigned_str = fmt_dt(assign.assigned_at)
+                    team_rows.append([
+                        emp.id, emp.full_name, emp.email, role.role_name if role else "Employee",
+                        emp.hourly_cost_rate or 0.0, emp.hourly_billing_rate or 0.0, assign.custom_hourly_cost, assign.custom_hourly_billing, assigned_str
+                    ])
+                team_alignments = [
+                    center_align, left_align, left_align, left_align,
+                    right_align, right_align, right_align, right_align, center_align
+                ]
+                team_formats = {4: "₹#,##0.00", 5: "₹#,##0.00", 6: "₹#,##0.00", 7: "₹#,##0.00"}
+                
+                write_sheet("Assigned Team Members", team_headers, team_rows, team_alignments, team_formats)
+
+                # 3. Timeline & Milestones
+                timeline_headers = [
+                    "Milestone ID", "Milestone Name", "Expected Start", "Expected End", 
+                    "Actual Start", "Actual End", "Status", "Remarks", "Created At"
+                ]
+                timeline_rows = []
+                for t in timeline:
+                    exp_start = fmt_date(t.expected_start)
+                    exp_end = fmt_date(t.expected_end)
+                    act_start = fmt_date(t.actual_start)
+                    act_end = fmt_date(t.actual_end)
+                    created_at = fmt_dt(t.created_at)
+                    timeline_rows.append([
+                        t.id, t.milestone_name, exp_start, exp_end,
+                        act_start, act_end, t.status, t.remarks or "N/A", created_at
+                    ])
+                timeline_alignments = [
+                    center_align, left_align, center_align, center_align,
+                    center_align, center_align, center_align, left_align, center_align
+                ]
+                
+                write_sheet("Timeline & Milestones", timeline_headers, timeline_rows, timeline_alignments)
+
+                # 4. Payments
+                payment_headers = [
+                    "Payment ID", "Amount", "Payment Date", "Payment Method", "Reference Number", "Remarks", "Logged At"
+                ]
+                payment_rows = []
+                for p in payments:
+                    pay_date = fmt_date(p.payment_date)
+                    created_at = fmt_dt(p.created_at)
+                    payment_rows.append([
+                        p.id, p.amount or 0.0, pay_date, p.payment_method or "N/A", p.reference_number or "N/A", p.remarks or "N/A", created_at
+                    ])
+                payment_alignments = [
+                    center_align, right_align, center_align, center_align, center_align, left_align, center_align
+                ]
+                payment_formats = {1: "₹#,##0.00"}
+                
+                write_sheet("Payments", payment_headers, payment_rows, payment_alignments, payment_formats)
+
+                # 5. Expenses
+                expense_headers = [
+                    "Expense ID", "Expense Name", "Amount", "Expense Date", "Description", "Logged At"
+                ]
+                expense_rows = []
+                for e in expenses:
+                    exp_date = fmt_date(e.expense_date)
+                    created_at = fmt_dt(e.created_at)
+                    expense_rows.append([
+                        e.id, e.expense_name, e.amount or 0.0, exp_date, e.description or "N/A", created_at
+                    ])
+                expense_alignments = [
+                    center_align, left_align, right_align, center_align, left_align, center_align
+                ]
+                expense_formats = {2: "₹#,##0.00"}
+                
+                write_sheet("Expenses", expense_headers, expense_rows, expense_alignments, expense_formats)
+
+                # 6. Developer Timesheets
+                dev_headers = [
+                    "Task ID", "Employee Name", "Date Logged", "Hours Logged", "Tech Stack Used", 
+                    "GitHub Link", "Task Performed", "Tomorrow's Plan", "Employee Cost", "Billing Amount", "Profit/Loss", "Logged At"
+                ]
+                dev_rows = []
+                for dt, emp in dev_tasks:
+                    dt_date = fmt_date(dt.date)
+                    created_at = fmt_dt(dt.created_at)
+                    dev_rows.append([
+                        dt.id, emp.full_name, dt_date, dt.hours_logged or 0.0, dt.tech_stack or "N/A",
+                        dt.github_link or "N/A", dt.task_performed or "N/A", dt.tomorrow_plan or "N/A",
+                        dt.employee_cost or 0.0, dt.billing_amount or 0.0, dt.profit_loss or 0.0, created_at
+                    ])
+                dev_alignments = [
+                    center_align, left_align, center_align, right_align, center_align,
+                    left_align, left_align, left_align, right_align, right_align, right_align, center_align
+                ]
+                dev_formats = {3: "0.0", 8: "₹#,##0.00", 9: "₹#,##0.00", 10: "₹#,##0.00"}
+                
+                write_sheet("Developer Timesheets", dev_headers, dev_rows, dev_alignments, dev_formats)
+
+                # 7. Content Creator Timesheets
+                content_headers = [
+                    "Task ID", "Employee Name", "Date Logged", "Hours Logged", "Reels Count", "Long Video Count",
+                    "Poster Count", "Calls Made", "Platform", "Total Content", "Task Performed", 
+                    "Employee Cost", "Billing Amount", "Profit/Loss", "Logged At"
+                ]
+                content_rows = []
+                for ct, emp in content_tasks:
+                    ct_date = fmt_date(ct.date)
+                    created_at = fmt_dt(ct.created_at)
+                    content_rows.append([
+                        ct.id, emp.full_name, ct_date, ct.hours_logged or 0.0, ct.reels_count or 0, ct.long_video_count or 0,
+                        ct.poster_count or 0, ct.calls_made or 0, ct.platform or "N/A", ct.total_content or 0, ct.task_performed or "N/A",
+                        ct.employee_cost or 0.0, ct.billing_amount or 0.0, ct.profit_loss or 0.0, created_at
+                    ])
+                content_alignments = [
+                    center_align, left_align, center_align, right_align, right_align, right_align,
+                    right_align, right_align, center_align, right_align, left_align,
+                    right_align, right_align, right_align, center_align
+                ]
+                content_formats = {3: "0.0", 4: "#,##0", 5: "#,##0", 6: "#,##0", 7: "#,##0", 9: "#,##0", 11: "₹#,##0.00", 12: "₹#,##0.00", 13: "₹#,##0.00"}
+                
+                write_sheet("Content Creator Timesheets", content_headers, content_rows, content_alignments, content_formats)
+
+                # 8. Gatekeeper Checklist
+                checklist_headers = [
+                    "Checklist Item ID", "Phase", "Task Description", "Completed State", "Last Updated"
+                ]
+                checklist_rows = []
+                for state_item, template in checklists:
+                    updated_at = fmt_dt(state_item.updated_at)
+                    checklist_rows.append([
+                        state_item.id, template.phase, template.task_description,
+                        "Checked" if state_item.is_checked else "Pending", updated_at
+                    ])
+                checklist_alignments = [
+                    center_align, center_align, left_align, center_align, center_align
+                ]
+                
+                write_sheet("Gatekeeper Checklist", checklist_headers, checklist_rows, checklist_alignments)
+
+                # 9. SRS & Documents
+                srs_headers = [
+                    "Document ID", "Title", "Version", "File URL / Path", "Approval Status", "Approved By", "Uploaded At"
+                ]
+                srs_rows = []
+                for doc in srs_docs:
+                    created_at = fmt_dt(doc.created_at)
+                    srs_rows.append([
+                        doc.id, doc.document_title, doc.version, doc.file_url_or_path or "N/A", doc.status, doc.approved_by or "N/A", created_at
+                    ])
+                srs_alignments = [
+                    center_align, left_align, center_align, left_align, center_align, left_align, center_align
+                ]
+                
+                write_sheet("SRS & Documents", srs_headers, srs_rows, srs_alignments)
+
+                # Save Workbook to binary stream
+                out = io.BytesIO()
+                wb.save(out)
+                return out.getvalue()
+                
+            except Exception as e:
+                return self._handle_error("export_project_xlsx_data", e, context={"project_id": project_id})
+
+    def _is_checklist_completed(self, session, project_id: str, phase: str) -> bool:
+        templates = session.query(ChecklistTemplate).filter_by(project_id=project_id, phase=phase).all()
+        if not templates:
+            return True
+        template_ids = [t.id for t in templates]
+        checked_count = session.query(ProjectChecklistState).filter(
+            ProjectChecklistState.project_id == project_id,
+            ProjectChecklistState.checklist_id.in_(template_ids),
+            ProjectChecklistState.is_checked == True
+        ).count()
+        return checked_count == len(templates)
+
     def edit_project(self, project_id: str, data: dict) -> str:
         with self.SessionLocal() as session:
             try:
                 proj = session.query(Projects).filter_by(id=project_id).first()
                 if not proj:
                     return json.dumps({"error": "Project not found"})
+                
+                # Check status transition rules
+                if "status" in data:
+                    new_status = data["status"]
+                    if new_status == "In Progress" and proj.status != "In Progress":
+                        if not self._is_checklist_completed(session, project_id, "START"):
+                            return json.dumps({"error": "Cannot start project. The 'START' phase checklist must be fully completed first."})
+                    elif new_status == "Completed" and proj.status != "Completed":
+                        if not self._is_checklist_completed(session, project_id, "END"):
+                            return json.dumps({"error": "Cannot complete project. The 'END' phase checklist must be fully completed first."})
+
                 for key, value in data.items():
                     if hasattr(proj, key):
                         setattr(proj, key, value)
@@ -1312,11 +1994,58 @@ class DatabaseOperations:
                 session.rollback()
                 return self._handle_error("check_out", e)
 
+    def record_daily_absences_internal(self, session) -> None:
+        """Helper to dynamically populate 'Absent' records for active employees who haven't checked in today."""
+        now = datetime.now()
+        start_of_day = datetime.combine(now.date(), datetime.min.time())
+        end_of_day = datetime.combine(now.date(), datetime.max.time())
+        
+        active_employees = session.query(Employees).filter(Employees.is_active == True).all()
+        for emp in active_employees:
+            # Check if there is any attendance record for this employee today
+            existing = session.query(Attendance).filter(
+                Attendance.employee_id == emp.id,
+                Attendance.date.between(start_of_day, end_of_day)
+            ).first()
+            
+            if not existing:
+                absent_record = Attendance(
+                    employee_id=emp.id,
+                    date=now,
+                    status="Absent",
+                    total_hours=0.0,
+                    notes="Auto-recorded absent (no check-in detected)"
+                )
+                session.add(absent_record)
+        session.commit()
+
+    def record_daily_absences(self) -> str:
+        with self.SessionLocal() as session:
+            try:
+                self.record_daily_absences_internal(session)
+                return json.dumps({"status": "success", "message": "Daily absences recorded successfully."})
+            except Exception as e:
+                session.rollback()
+                return self._handle_error("record_daily_absences", e)
+
     def get_all_attendance(self) -> str:
         with self.SessionLocal() as session:
             try:
-                records = session.query(Attendance).all()
-                return json.dumps([self.model_to_dict(r) for r in records], indent=4, default=str)
+                # Automatically record absences first!
+                self.record_daily_absences_internal(session)
+                
+                # Fetch all attendance records joined with Employees to resolve names
+                records = session.query(Attendance, Employees.full_name)\
+                                 .join(Employees, Attendance.employee_id == Employees.id)\
+                                 .order_by(Attendance.date.desc())\
+                                 .all()
+                
+                results = []
+                for r, name in records:
+                    d = self.model_to_dict(r)
+                    d['employee_name'] = name
+                    results.append(d)
+                return json.dumps(results, indent=4, default=str)
             except Exception as e:
                 return self._handle_error("get_all_attendance", e)
 
@@ -1368,8 +2097,40 @@ class DatabaseOperations:
     def get_all_login_history(self) -> str:
         with self.SessionLocal() as session:
             try:
-                records = session.query(LoginHistory).all()
-                return json.dumps([self.model_to_dict(r) for r in records], indent=4, default=str)
+                records = session.query(LoginHistory).order_by(LoginHistory.login_timestamp.desc()).all()
+                
+                # Fetch all employees and admins to build a fast map for metadata resolution
+                employees = session.query(Employees.id, Employees.full_name, Employees.username).all()
+                admins = session.query(Admins.id, Admins.full_name, Admins.username).all()
+                
+                user_map = {}
+                for e_id, name, uname in employees:
+                    user_map[e_id] = {"full_name": name, "username": uname}
+                for a_id, name, uname in admins:
+                    user_map[a_id] = {"full_name": name, "username": uname}
+                
+                results = []
+                for r in records:
+                    r_dict = self.model_to_dict(r)
+                    
+                    # Parse user agent into device/browser
+                    ua = r.user_agent or "Unknown"
+                    browser, device = self.parse_user_agent(ua)
+                    
+                    # Resolve names
+                    user_info = user_map.get(r.user_id, {"full_name": "Unknown", "username": "N/A"})
+                    r_dict["full_name"] = user_info["full_name"]
+                    r_dict["username"] = user_info["username"]
+                    r_dict["browser"] = browser
+                    r_dict["device"] = device
+                    
+                    # Format login_timestamp as ISO-8601 string ending with Z (UTC indicator)
+                    if isinstance(r.login_timestamp, datetime):
+                        r_dict["login_timestamp"] = r.login_timestamp.strftime("%Y-%m-%dT%H:%M:%SZ")
+                    
+                    results.append(r_dict)
+                    
+                return json.dumps(results, indent=4, default=str)
             except Exception as e:
                 return self._handle_error("get_all_login_history", e)
 
