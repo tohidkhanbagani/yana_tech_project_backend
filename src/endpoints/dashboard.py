@@ -28,6 +28,13 @@ def get_month_bounds():
     start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     return start_of_month, now
 
+def get_prev_month_bounds():
+    now = datetime.now()
+    start_of_this_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    end_of_prev_month = start_of_this_month - timedelta(seconds=1)
+    start_of_prev_month = end_of_prev_month.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    return start_of_prev_month, end_of_prev_month
+
 # ==========================================
 #        1. THE FINANCIAL SUITE
 # ==========================================
@@ -296,6 +303,11 @@ def get_workforce_overview(current_user: dict = Depends(get_current_user)):
 
     try:
         with SessionLocal() as session:
+            # Sync daily absences first
+            from src.database.database_operations import DatabaseOperations
+            db_ops = DatabaseOperations()
+            db_ops.record_daily_absences_internal(session)
+
             total_employees = session.query(Employees).filter(Employees.is_active == True).count()
             
             # Count distinct employees who checked in today
@@ -313,8 +325,37 @@ def get_workforce_overview(current_user: dict = Depends(get_current_user)):
                                   .filter(Employees.is_active == True)\
                                   .group_by(Departments_Roles.department_name).all()
 
+            # Query absent employees details
+            absent_records = session.query(
+                Employees.full_name,
+                Employees.username,
+                Departments_Roles.department_name
+            ).join(
+                Attendance, Attendance.employee_id == Employees.id
+            ).outerjoin(
+                Departments_Roles, Employees.role_id == Departments_Roles.id
+            ).filter(
+                Attendance.date.between(start_today, end_today),
+                Attendance.status == "Absent",
+                Employees.is_active == True
+            ).all()
+
+            absent_list = [
+                {
+                    "name": name or "Unknown",
+                    "username": username or "N/A",
+                    "department": dept or "General"
+                }
+                for name, username, dept in absent_records
+            ]
+
             return {
-                "radar": {"total_staff": total_employees, "active_today": active_today, "absent_today": absent_today},
+                "radar": {
+                    "total_staff": total_employees,
+                    "active_today": active_today,
+                    "absent_today": absent_today,
+                    "absent_employees": absent_list
+                },
                 "resource_distribution": {dept: count for dept, count in distribution}
             }
     except Exception as e:
@@ -581,7 +622,18 @@ def get_analytics_suite(current_user: dict = Depends(get_current_user)):
                 
                 # Simple Health Formula
                 health_score = int((0.5 * completion_rate + 0.5 * budget_score) * 100)
-                project_health.append({"id": p.id, "name": p.name, "score": health_score})
+                project_health.append({
+                    "id": p.id,
+                    "name": p.name,
+                    "score": health_score,
+                    "milestones_total": m_total,
+                    "milestones_completed": m_done,
+                    "completion_rate_percent": round(completion_rate * 100, 1),
+                    "accumulated_cost": round(total_cost, 2),
+                    "budget": float(p.budget or 0),
+                    "budget_ratio_percent": round(budget_ratio * 100, 1),
+                    "budget_score_percent": round(budget_score * 100, 1)
+                })
                 
                 # B. Profitability
                 actual_client_cost = float(p.client_cost) if p.client_cost else 0.0
@@ -602,7 +654,11 @@ def get_analytics_suite(current_user: dict = Depends(get_current_user)):
             if working_days_mtd > 22: working_days_mtd = 22
             expected_hours = working_days_mtd * 8
             
+            # Map role_id to department name for workforce categorisation
+            role_mapping = {r.id: r.department_name for r in session.query(Departments_Roles).all()}
+            
             utilization_list = []
+            idle_leakage_details = []
             idle_cost_leakage = 0.0
             
             for emp in employees:
@@ -622,16 +678,32 @@ def get_analytics_suite(current_user: dict = Depends(get_current_user)):
                 if util < 0.6:
                     leak = (expected_hours - total_emp_hours) * float(emp.hourly_cost_rate or 0)
                     idle_cost_leakage += leak
+                    dept_name = role_mapping.get(emp.role_id, "General")
+                    idle_leakage_details.append({
+                        "employee_id": emp.id,
+                        "employee_name": emp.full_name,
+                        "department": dept_name,
+                        "utilization": round(util * 100, 1),
+                        "expected_hours": expected_hours,
+                        "logged_hours": total_emp_hours,
+                        "idle_hours": round(expected_hours - total_emp_hours, 1),
+                        "hourly_rate": float(emp.hourly_cost_rate or 0),
+                        "leakage_cost": round(leak, 2)
+                    })
 
             return {
                 "project_health": project_health,
                 "profitability": profitability,
                 "utilization": utilization_list,
                 "idle_cost_leakage": round(idle_cost_leakage, 2),
+                "idle_leakage_details": idle_leakage_details,
                 "alerts": alerts,
                 "meta": {
                     "last_updated": now.isoformat(),
-                    "period": "Month-to-Date"
+                    "period": "Month-to-Date",
+                    "working_days_mtd": working_days_mtd,
+                    "expected_hours": expected_hours,
+                    "calculation_formula": "Elapsed Days MTD (Max 22) × 8 expected hours/day"
                 }
             }
     except Exception as e:
@@ -663,6 +735,40 @@ def get_v2_dashboard_summary(current_user: dict = Depends(get_current_user)):
             content_cost = session.query(func.coalesce(func.sum(ContentCreatorTasks.employee_cost), 0)).scalar()
             expenses = session.query(func.coalesce(func.sum(ProjectExpenses.amount), 0)).scalar()
             total_expenditure = float(dev_cost) + float(content_cost) + float(expenses)
+
+            # --- MoM KPI Trends Calculation ---
+            start_month, now_month = get_month_bounds()
+            start_prev_month, end_prev_month = get_prev_month_bounds()
+
+            # Current Month Revenue (Billed Tasks)
+            curr_dev_rev = session.query(func.coalesce(func.sum(DeveloperTasks.billing_amount), 0)).filter(DeveloperTasks.date.between(start_month, now_month)).scalar()
+            curr_content_rev = session.query(func.coalesce(func.sum(ContentCreatorTasks.billing_amount), 0)).filter(ContentCreatorTasks.date.between(start_month, now_month)).scalar()
+            curr_revenue = float(curr_dev_rev or 0) + float(curr_content_rev or 0)
+
+            # Previous Month Revenue
+            prev_dev_rev = session.query(func.coalesce(func.sum(DeveloperTasks.billing_amount), 0)).filter(DeveloperTasks.date.between(start_prev_month, end_prev_month)).scalar()
+            prev_content_rev = session.query(func.coalesce(func.sum(ContentCreatorTasks.billing_amount), 0)).filter(ContentCreatorTasks.date.between(start_prev_month, end_prev_month)).scalar()
+            prev_revenue = float(prev_dev_rev or 0) + float(prev_content_rev or 0)
+
+            # Current Month Expenditure (Costs + Expenses)
+            curr_dev_cost = session.query(func.coalesce(func.sum(DeveloperTasks.employee_cost), 0)).filter(DeveloperTasks.date.between(start_month, now_month)).scalar()
+            curr_content_cost = session.query(func.coalesce(func.sum(ContentCreatorTasks.employee_cost), 0)).filter(ContentCreatorTasks.date.between(start_month, now_month)).scalar()
+            curr_exp = session.query(func.coalesce(func.sum(ProjectExpenses.amount), 0)).filter(
+                ProjectExpenses.expense_date.between(start_month.strftime("%Y-%m-%d"), now_month.strftime("%Y-%m-%d"))
+            ).scalar()
+            curr_burn = float(curr_dev_cost or 0) + float(curr_content_cost or 0) + float(curr_exp or 0)
+
+            # Previous Month Expenditure
+            prev_dev_cost = session.query(func.coalesce(func.sum(DeveloperTasks.employee_cost), 0)).filter(DeveloperTasks.date.between(start_prev_month, end_prev_month)).scalar()
+            prev_content_cost = session.query(func.coalesce(func.sum(ContentCreatorTasks.employee_cost), 0)).filter(ContentCreatorTasks.date.between(start_prev_month, end_prev_month)).scalar()
+            prev_exp = session.query(func.coalesce(func.sum(ProjectExpenses.amount), 0)).filter(
+                ProjectExpenses.expense_date.between(start_prev_month.strftime("%Y-%m-%d"), end_prev_month.strftime("%Y-%m-%d"))
+            ).scalar()
+            prev_burn = float(prev_dev_cost or 0) + float(prev_content_cost or 0) + float(prev_exp or 0)
+
+            # Trends Percentages
+            revenue_trend = round(((curr_revenue - prev_revenue) / prev_revenue * 100), 2) if prev_revenue > 0 else (100.0 if curr_revenue > 0 else 0.0)
+            burn_trend = round(((curr_burn - prev_burn) / prev_burn * 100), 2) if prev_burn > 0 else (100.0 if curr_burn > 0 else 0.0)
 
             # 2. Real Chart Data Aggregation (Optimized Bulk Queries)
             project_status = session.query(Projects.status, func.count(Projects.id)).group_by(Projects.status).all()
@@ -847,7 +953,9 @@ def get_v2_dashboard_summary(current_user: dict = Depends(get_current_user)):
                     "total_employees": total_employees,
                     "total_clients": total_clients,
                     "total_expenditure": total_expenditure,
-                    "avg_efficiency": avg_efficiency
+                    "avg_efficiency": avg_efficiency,
+                    "revenue_trend": revenue_trend,
+                    "burn_trend": burn_trend
                 },
                 "charts": {
                     "project_status": project_status_counts,

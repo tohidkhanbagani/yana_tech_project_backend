@@ -179,4 +179,27 @@ def submit_project_checklist_state(project_id: str, payload: ChecklistStateUpdat
             db.add(new_state)
             
     db.commit()
+
+    # Auto-transition project status on 'START' checklist completion
+    if payload.phase == "START" and project.status == "Planning":
+        templates = db.query(ChecklistTemplate).filter(
+            ChecklistTemplate.project_id == project_id,
+            ChecklistTemplate.phase == "START"
+        ).all()
+        if templates:
+            template_ids = [t.id for t in templates]
+            checked_count = db.query(ProjectChecklistState).filter(
+                ProjectChecklistState.project_id == project_id,
+                ProjectChecklistState.checklist_id.in_(template_ids),
+                ProjectChecklistState.is_checked == True
+            ).count()
+            is_completed = (checked_count == len(templates))
+        else:
+            is_completed = True
+            
+        if is_completed:
+            project.status = "In Progress"
+            db.commit()
+            logger.info(f"Project {project_id} auto-transitioned to 'In Progress' on 'START' checklist completion.")
+
     return {"message": "Checklist saved successfully"}

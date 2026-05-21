@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 import logging
 from schemas import (
     ProjectCreate, ProjectUpdate,
@@ -383,3 +383,61 @@ def delete_project_payment(payment_id: str, current_user: dict = Depends(get_cur
     except Exception as e:
         logger.error(f"Router Error in delete_project_payment: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to delete payment.")
+
+@router.get("/export/{project_id}", tags=["Project Management"])
+def export_project_xlsx(project_id: str, current_user: dict = Depends(get_current_user)):
+    try:
+        xlsx_data = db.export_project_xlsx_data(project_id)
+        if xlsx_data is None:
+            raise HTTPException(status_code=404, detail="Project not found.")
+        
+        # If there's an error encoded in a JSON string returned by DatabaseOperations
+        # (e.g. {"error": "..."} or {"critical_error": "..."})
+        if isinstance(xlsx_data, bytes):
+            try:
+                decoded_str = xlsx_data.decode('utf-8', errors='ignore').strip()
+                if decoded_str.startswith('{"'):
+                    import json
+                    err = json.loads(decoded_str)
+                    if "error" in err or "critical_error" in err:
+                        raise HTTPException(status_code=400, detail=err.get("error") or err.get("critical_error"))
+            except Exception:
+                pass
+        elif isinstance(xlsx_data, str) and xlsx_data.strip().startswith('{"'):
+            try:
+                import json
+                err = json.loads(xlsx_data)
+                if "error" in err or "critical_error" in err:
+                    raise HTTPException(status_code=400, detail=err.get("error") or err.get("critical_error"))
+            except ValueError:
+                pass
+
+        # Fetch project name for the filename
+        proj_response = db.get_project(project_id)
+        import json
+        proj_name = "project"
+        try:
+            proj_info = json.loads(proj_response)
+            if isinstance(proj_info, dict) and "name" in proj_info:
+                proj_name = proj_info["name"]
+        except Exception:
+            pass
+
+        # Format clean filename
+        import re
+        clean_name = re.sub(r'[^a-zA-Z0-9]+', '_', proj_name).lower()
+        filename = f"project_{clean_name}_export.xlsx"
+
+        return Response(
+            content=xlsx_data,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}",
+                "Access-Control-Expose-Headers": "Content-Disposition"
+            }
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Router Error in export_project_xlsx: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to export project data Excel.")
