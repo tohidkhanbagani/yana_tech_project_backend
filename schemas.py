@@ -102,11 +102,22 @@ class ClientUpdate(ConfiguredBaseModel):
 class ProjectCreate(ConfiguredBaseModel):
     name: str = Field(..., min_length=2, description="Project Name")
     project_type: Optional[str] = Field("Engineering", description="Engineering, Content, or Both")
-    manager: Optional[str] = "N/A"
+    project_platform: Optional[str] = Field("Generic project", description="Platform of the project (e.g., Web, Mobile, etc.)")
+    description: Optional[str] = Field("N/A", description="Project description or notes")
     status: Optional[str] = Field("Pending", description="Pending, Active, Completed, Cancelled")
     client_cost: Optional[float] = Field(0.0, ge=0.0)
     budget: Optional[float] = Field(0.0, ge=0.0)
     approx_cost: Optional[float] = Field(0.0, ge=0.0)
+    cost_type: Optional[str] = Field("N/A", description="Billing/Cost Type (e.g. Fixed Price, Hourly)")
+    start_date: Optional[str] = "N/A"
+    end_date: Optional[str] = "N/A"
+    progress: Optional[str] = "0%"
+    manager: Optional[str] = "N/A"
+    client: Optional[str] = "N/A"
+    referred_by: Optional[str] = "N/A"
+    filled_by: Optional[str] = "N/A"
+    assigned_to: Optional[str] = "N/A"
+    team: Optional[str] = "N/A"
     srs_id: Optional[str] = Field(None, description="UUID of the linked SRS Document")
 
     model_config = ConfigDict(extra="allow")
@@ -114,7 +125,22 @@ class ProjectCreate(ConfiguredBaseModel):
 class ProjectUpdate(ConfiguredBaseModel):
     name: Optional[str] = None
     project_type: Optional[str] = None
+    project_platform: Optional[str] = None
+    description: Optional[str] = None
     status: Optional[str] = None
+    client_cost: Optional[float] = None
+    budget: Optional[float] = None
+    approx_cost: Optional[float] = None
+    cost_type: Optional[str] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    progress: Optional[str] = None
+    manager: Optional[str] = None
+    client: Optional[str] = None
+    referred_by: Optional[str] = None
+    filled_by: Optional[str] = None
+    assigned_to: Optional[str] = None
+    team: Optional[str] = None
     srs_id: Optional[str] = None
     model_config = ConfigDict(extra="allow")
 

@@ -138,6 +138,7 @@ class Projects(Base):
     # Project Identity & Context
     name = Column(String, nullable=True, default="N/A")
     project_type = Column(String, nullable=True, default="Engineering")
+    project_platform = Column(String, nullable=True, default="Generic project")
     description = Column(String, nullable=True, default="N/A")
     status = Column(String, nullable=True, default="N/A")
     

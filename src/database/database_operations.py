@@ -52,6 +52,82 @@ class DatabaseOperations:
             return {}
         return {c.key: getattr(obj, c.key) for c in inspect(obj).mapper.column_attrs}
 
+    def _parse_datetime(self, val: str) -> Optional[datetime]:
+        """
+        Attempts to parse a string representation of datetime into a Python datetime object.
+        Supports various standard formats.
+        """
+        if not val or val.strip() in ("N/A", "None", "nan", "NaN", "NaT"):
+            return None
+        val_str = val.strip()
+        for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(val_str, fmt)
+            except ValueError:
+                continue
+        # ISO fallback
+        try:
+            return datetime.fromisoformat(val_str.replace(" ", "T"))
+        except ValueError:
+            return None
+
+    def _sanitize_payload(self, data: dict) -> dict:
+        """
+        Cleanses incoming project/attendance/payment payloads.
+        Converts Pandas/NumPy NaN, NaT, and null-like objects to Python None,
+        and automatically converts string-casted Datetime fields to datetime objects,
+        preventing SQLite parameter binding errors.
+        """
+        import math
+        from datetime import datetime as dt_class
+        sanitized = {}
+        datetime_keys = {
+            "created_at", "updated_at", "payment_date", "login_timestamp", "date",
+            "check_in_time", "check_out_time", "expected_start", "expected_end",
+            "actual_start", "actual_end"
+        }
+        for k, v in data.items():
+            if v is None:
+                sanitized[k] = None
+                continue
+                
+            v_str = str(v).strip()
+            
+            # Check for Pandas NaT or nan or empty values
+            if v_str in ("NaT", "nan", "NaN", "") or type(v).__name__ == "NaTType":
+                sanitized[k] = None
+                continue
+                
+            if isinstance(v, float) and math.isnan(v):
+                sanitized[k] = None
+                continue
+                
+            # Handle Pandas Timestamp / Python datetime objects
+            if type(v).__name__ == "Timestamp" or hasattr(v, "to_pydatetime") or isinstance(v, dt_class):
+                py_dt = v.to_pydatetime() if hasattr(v, "to_pydatetime") else v
+                if k in {"start_date", "end_date"}:
+                    sanitized[k] = py_dt.strftime("%Y-%m-%d")
+                else:
+                    sanitized[k] = py_dt
+                continue
+                
+            # Handle strings for datetime or start/end date
+            if isinstance(v, str):
+                if k in datetime_keys or k in {"created_at", "updated_at"}:
+                    parsed = self._parse_datetime(v)
+                    sanitized[k] = parsed
+                elif k in {"start_date", "end_date"}:
+                    # Clean up date strings like "2026-02-21 00:00:00" to "2026-02-21"
+                    if len(v) >= 10 and v[4] == "-" and v[7] == "-":
+                        sanitized[k] = v[:10]
+                    else:
+                        sanitized[k] = v
+                else:
+                    sanitized[k] = v
+            else:
+                sanitized[k] = v
+        return sanitized
+
     def _handle_error(self, operation: str, exception: Exception, context: dict = None) -> str:
         """
         Centralized, professional error handler. 
@@ -523,8 +599,26 @@ class DatabaseOperations:
     def add_project(self, data: dict) -> str:
         with self.SessionLocal() as session:
             try:
+                # Sanitize incoming payload
+                data = self._sanitize_payload(data)
+                
+                # Normalize spelling typo in referral field
+                if "reffered_by" in data and "referred_by" not in data:
+                    data["referred_by"] = data["reffered_by"]
+
+                # Intercept and normalize legacy cost_type representing platform
+                platforms = {"Mobile App", "Website", "Software", "Social Media", "Graphics"}
+                if "cost_type" in data and data["cost_type"] in platforms:
+                    if "project_platform" not in data or not data["project_platform"] or data["project_platform"] == "Generic project":
+                        data["project_platform"] = data["cost_type"]
+                    data["cost_type"] = "Internal / Non-Billable"
+
                 valid_keys = {c.key for c in inspect(Projects).mapper.column_attrs}
                 filtered_data = {k: v for k, v in data.items() if k in valid_keys}
+                
+                # Omit None values to allow Python-defined defaults to be used in model constructor
+                filtered_data = {k: v for k, v in filtered_data.items() if v is not None}
+                
                 new_project = Projects(**filtered_data)
                 session.add(new_project)
                 session.commit()
@@ -619,10 +713,7 @@ class DatabaseOperations:
                     p_dict = self.model_to_dict(proj)
                     
                     # Progress calculation
-                    if total_milestones > 0:
-                        p_dict['progress'] = f"{int((completed_milestones / total_milestones) * 100)}%"
-                    else:
-                        p_dict['progress'] = proj.progress if hasattr(proj, 'progress') and proj.progress else "0%"
+                    p_dict['progress'] = proj.progress if proj.progress else "0%"
                         
                     # Payment calculation
                     client_cost = float(proj.client_cost or 0.0)
@@ -863,7 +954,7 @@ class DatabaseOperations:
                 res_list = []
                 for assign, proj in assignments:
                     p_dict = self.model_to_dict(proj)
-                    p_dict['progress'] = self._calculate_project_progress(session, proj)
+                    p_dict['progress'] = proj.progress if proj.progress else "0%"
                     res_list.append(p_dict)
                     
                 return json.dumps(res_list, indent=4, default=str)
@@ -1002,7 +1093,7 @@ class DatabaseOperations:
                         assigned_employees.append(e_dict)
                 
                 p_dict['assigned_employees'] = assigned_employees
-                p_dict['progress'] = self._calculate_project_progress(session, proj)
+                p_dict['progress'] = proj.progress if proj.progress else "0%"
                 
                 # Compute Payment Stats
                 pay_stats = self._calculate_payment_stats(session, proj)
@@ -1065,15 +1156,15 @@ class DatabaseOperations:
                 # --- SECTION 1: PROJECT METADATA ---
                 writer.writerow(["=== PROJECT METADATA ==="])
                 writer.writerow([
-                    "Project ID", "Project Name", "Project Type", "Description", "Status",
+                    "Project ID", "Project Name", "Project Type", "Project Platform", "Description", "Status",
                     "Client Cost", "Budget", "Approx Cost", "Cost Type", "Start Date",
                     "End Date", "Progress", "Manager", "Client Name", "Team", 
                     "Referred By", "Filled By", "Assigned To", "Created At", "Updated At"
                 ])
                 writer.writerow([
-                    proj.id, proj.name, proj.project_type, proj.description, proj.status,
+                    proj.id, proj.name, proj.project_type, proj.project_platform or "N/A", proj.description, proj.status,
                     proj.client_cost, proj.budget, proj.approx_cost, proj.cost_type, proj.start_date,
-                    proj.end_date, self._calculate_project_progress(session, proj), proj.manager, proj.client, proj.team,
+                    proj.end_date, proj.progress or "0%", proj.manager, proj.client, proj.team,
                     proj.referred_by, proj.filled_by, proj.assigned_to, proj.created_at, proj.updated_at
                 ])
                 writer.writerow([]) # Empty spacer
@@ -1349,7 +1440,7 @@ class DatabaseOperations:
 
                 # 1. Project Metadata
                 proj_headers = [
-                    "Project ID", "Project Name", "Project Type", "Description", "Status",
+                    "Project ID", "Project Name", "Project Type", "Project Platform", "Description", "Status",
                     "Client Cost", "Budget", "Approx Cost", "Cost Type", "Start Date",
                     "End Date", "Progress", "Manager", "Client Name", "Team", 
                     "Referred By", "Filled By", "Assigned To", "Created At", "Updated At"
@@ -1361,21 +1452,21 @@ class DatabaseOperations:
                 updated_at_str = fmt_dt(proj.updated_at)
                 
                 proj_rows = [[
-                    proj.id, proj.name, proj.project_type, proj.description or "N/A", proj.status,
+                    proj.id, proj.name, proj.project_type, proj.project_platform or "N/A", proj.description or "N/A", proj.status,
                     proj.client_cost or 0.0, proj.budget or 0.0, proj.approx_cost or 0.0, proj.cost_type or "N/A", start_date_str,
-                    end_date_str, f"{self._calculate_project_progress(session, proj)}%", proj.manager or "N/A", proj.client or "N/A", proj.team or "N/A",
+                    end_date_str, proj.progress or "0%", proj.manager or "N/A", proj.client or "N/A", proj.team or "N/A",
                     proj.referred_by or "N/A", proj.filled_by or "N/A", proj.assigned_to or "N/A", created_at_str, updated_at_str
                 ]]
                 
-                # Alignments: ID(C), Name(L), Type(C), Desc(L), Status(C), ClientCost(R), Budget(R), ApproxCost(R), CostType(C), Dates(C), Progress(C), etc.
+                # Alignments: ID(C), Name(L), Type(C), Platform(C), Desc(L), Status(C), ClientCost(R), Budget(R), ApproxCost(R), CostType(C), Dates(C), Progress(C), etc.
                 proj_alignments = [
-                    center_align, left_align, center_align, left_align, center_align,
+                    center_align, left_align, center_align, center_align, left_align, center_align,
                     right_align, right_align, right_align, center_align, center_align,
                     center_align, center_align, left_align, left_align, left_align,
                     left_align, left_align, left_align, center_align, center_align
                 ]
-                # Numeric Formats: Client Cost (index 5), Budget (index 6), Approx Cost (index 7)
-                proj_formats = {5: "₹#,##0.00", 6: "₹#,##0.00", 7: "₹#,##0.00"}
+                # Numeric Formats: Client Cost (index 6), Budget (index 7), Approx Cost (index 8)
+                proj_formats = {6: "₹#,##0.00", 7: "₹#,##0.00", 8: "₹#,##0.00"}
                 
                 write_sheet("Project Metadata", proj_headers, proj_rows, proj_alignments, proj_formats)
 
@@ -1564,6 +1655,20 @@ class DatabaseOperations:
                 if not proj:
                     return json.dumps({"error": "Project not found"})
                 
+                # Sanitize incoming payload
+                data = self._sanitize_payload(data)
+                
+                # Normalize spelling typo in referral field
+                if "reffered_by" in data and "referred_by" not in data:
+                    data["referred_by"] = data["reffered_by"]
+
+                # Intercept and normalize legacy cost_type representing platform
+                platforms = {"Mobile App", "Website", "Software", "Social Media", "Graphics"}
+                if "cost_type" in data and data["cost_type"] in platforms:
+                    if "project_platform" not in data or not data["project_platform"] or data["project_platform"] == "Generic project":
+                        data["project_platform"] = data["cost_type"]
+                    data["cost_type"] = "Internal / Non-Billable"
+
                 # Check status transition rules
                 if "status" in data:
                     new_status = data["status"]
@@ -1927,10 +2032,54 @@ class DatabaseOperations:
     # ==========================================
     #             ATTENDANCE & LEAVES
     # ==========================================
+    def _auto_checkout_old_sessions_internal(self, session, employee_id: str, now: datetime) -> None:
+        """
+        Scans for any open attendance records (check_in_time present, check_out_time missing)
+        for this employee that are older than 16 hours, and auto-completes them (8 hours duration)
+        so that data remains clean and doesn't conflict with today's logins/check-ins.
+        """
+        from datetime import timedelta
+        dangling_records = session.query(Attendance).filter(
+            Attendance.employee_id == employee_id,
+            Attendance.check_in_time.isnot(None),
+            Attendance.check_out_time.is_(None)
+        ).all()
+        
+        for r in dangling_records:
+            # If the check-in is older than 16 hours, auto-checkout
+            if now - r.check_in_time > timedelta(hours=16):
+                r.check_out_time = r.check_in_time + timedelta(hours=8)
+                r.total_hours = 8.0
+                r.notes = (r.notes + " | " if r.notes else "") + "Auto Checked Out (forgot to check out)"
+                r.status = "Checked Out"
+        session.commit()
+
+    def _auto_checkout_all_old_sessions_internal(self, session, now: datetime) -> None:
+        """
+        Scans for all unclosed attendance records across all employees and auto-checks them out
+        if they are older than 16 hours.
+        """
+        from datetime import timedelta
+        dangling_records = session.query(Attendance).filter(
+            Attendance.check_in_time.isnot(None),
+            Attendance.check_out_time.is_(None)
+        ).all()
+        
+        for r in dangling_records:
+            if now - r.check_in_time > timedelta(hours=16):
+                r.check_out_time = r.check_in_time + timedelta(hours=8)
+                r.total_hours = 8.0
+                r.notes = (r.notes + " | " if r.notes else "") + "Auto Checked Out (forgot to check out)"
+                r.status = "Checked Out"
+        session.commit()
+
     def check_in(self, employee_id: str, ip_address: str = None) -> str:
         with self.SessionLocal() as session:
             try:
                 now = datetime.now()
+                # Run auto-checkout first for old dangling sessions of this employee
+                self._auto_checkout_old_sessions_internal(session, employee_id, now)
+
                 start_of_day = datetime.combine(now.date(), datetime.min.time())
                 end_of_day = datetime.combine(now.date(), datetime.max.time())
                 # Check if already checked in today
@@ -1940,12 +2089,26 @@ class DatabaseOperations:
                 ).first()
                 
                 if existing:
-                    return json.dumps({"error": "Already checked in for today."})
+                    # If the existing record is just an "Absent" record, we can overwrite it!
+                    if existing.status == "Absent":
+                        existing.check_in_time = now
+                        existing.date = now
+                        existing.status = "Present"
+                        existing.ip_address = ip_address
+                        existing.notes = "Checked in (overrode auto-absent)"
+                        session.commit()
+                        session.refresh(existing)
+                        attendence_dict = self.model_to_dict(existing)
+                        employee = session.query(Employees).filter_by(id=employee_id).first()
+                        attendence_dict['employee_name'] = employee.full_name if employee else "Employee"
+                        return json.dumps(attendence_dict, indent=4, default=str)
+                    else:
+                        return json.dumps({"error": "Already checked in for today."})
                 
                 new_attendance = Attendance(
                     employee_id=employee_id,
-                    check_in_time=datetime.now(),
-                    date=datetime.now(),
+                    check_in_time=now,
+                    date=now,
                     status="Present",
                     ip_address=ip_address
                 )
@@ -1968,20 +2131,20 @@ class DatabaseOperations:
         with self.SessionLocal() as session:
             try:
                 now = datetime.now()
-                start_of_day = datetime.combine(now.date(), datetime.min.time())
-                end_of_day = datetime.combine(now.date(), datetime.max.time())
+                # Run auto-checkout first for old dangling sessions of this employee
+                self._auto_checkout_old_sessions_internal(session, employee_id, now)
+
+                # Find the most recent active session (no check-out time)
                 attendance = session.query(Attendance).filter(
                     Attendance.employee_id == employee_id,
-                    Attendance.date.between(start_of_day, end_of_day)
-                ).first()
+                    Attendance.check_in_time.isnot(None),
+                    Attendance.check_out_time.is_(None)
+                ).order_by(Attendance.check_in_time.desc()).first()
                 
                 if not attendance:
-                    return json.dumps({"error": "No check-in record found for today."})
+                    return json.dumps({"error": "No active check-in record found. Please check in first."})
                 
-                if attendance.check_out_time:
-                    return json.dumps({"error": "Already checked out for today."})
-                
-                attendance.check_out_time = datetime.now()
+                attendance.check_out_time = now
                 attendance.status = "Checked Out"
                 # Calculate total hours
                 time_diff = attendance.check_out_time - attendance.check_in_time
@@ -2031,6 +2194,10 @@ class DatabaseOperations:
     def get_all_attendance(self) -> str:
         with self.SessionLocal() as session:
             try:
+                now = datetime.now()
+                # Run auto-checkout for all dangling records first
+                self._auto_checkout_all_old_sessions_internal(session, now)
+                
                 # Automatically record absences first!
                 self.record_daily_absences_internal(session)
                 
@@ -2089,7 +2256,10 @@ class DatabaseOperations:
     def get_employee_attendance(self, employee_id: str) -> str:
         with self.SessionLocal() as session:
             try:
-                records = session.query(Attendance).filter_by(employee_id=employee_id).all()
+                # Run auto-checkout first to ensure their displayed attendance history is clean
+                self._auto_checkout_old_sessions_internal(session, employee_id, datetime.now())
+                
+                records = session.query(Attendance).filter_by(employee_id=employee_id).order_by(Attendance.date.desc()).all()
                 return json.dumps([self.model_to_dict(r) for r in records], indent=4, default=str)
             except Exception as e:
                 return self._handle_error("get_employee_attendance", e)
