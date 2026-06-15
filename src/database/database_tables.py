@@ -97,7 +97,18 @@ class Employees(Base):
     photo = Column(String, nullable=True, default="N/A")
     additional_info = Column(String, nullable=True, default="N/A")
     
+    # New Fields for Access Control, Onboarding & Compliance
+    compliance_verified = Column(Boolean, nullable=True, default=False)
+    account_holder_name = Column(String, nullable=True, default="N/A")
+    pf_number = Column(String, nullable=True, default="N/A")
+    esic_number = Column(String, nullable=True, default="N/A")
+    tax_details = Column(String, nullable=True, default="N/A")
+    profile_edit_requested = Column(Boolean, nullable=True, default=False)
+    profile_unlocked = Column(Boolean, nullable=True, default=False)
+    profile_unlocked_until = Column(DateTime, nullable=True, default=None)
+    
     created_at = Column(DateTime, default=datetime.now)
+    working_hours = Column(Float, nullable=True, default=8.0)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 class LoginHistory(Base):
@@ -139,6 +150,7 @@ class Projects(Base):
     name = Column(String, nullable=True, default="N/A")
     project_type = Column(String, nullable=True, default="Engineering")
     project_platform = Column(String, nullable=True, default="Generic project")
+    tech_stack = Column(Text, nullable=True, default="N/A")
     description = Column(String, nullable=True, default="N/A")
     status = Column(String, nullable=True, default="N/A")
     
@@ -147,6 +159,9 @@ class Projects(Base):
     budget = Column(Float, nullable=True, default=0.0)
     approx_cost = Column(Float, nullable=True, default=0.0) # Preliminary estimate
     cost_type = Column(String, nullable=True, default="N/A")
+    billing_cycle = Column(String, nullable=True, default="N/A")
+    billing_rate = Column(Float, nullable=True, default=0.0)
+    next_billing_date = Column(String, nullable=True, default="N/A")
     
     # Timeline & Performance
     start_date = Column(String, nullable=True, default="N/A")
@@ -231,6 +246,13 @@ class ProjectTimeline(Base):
     actual_end = Column(DateTime, nullable=True)
     status = Column(String, nullable=True, default="Pending") # Pending, Active, Delayed, Completed
     remarks = Column(Text, nullable=True, default="N/A")
+
+    # Smart Metadata Tracking
+    sprint_name = Column(String, nullable=True, default="N/A")
+    module_name = Column(String, nullable=True, default="N/A")
+    feature_name = Column(String, nullable=True, default="N/A")
+    work_type = Column(String, nullable=True, default="Backend")
+    repo_name = Column(String, nullable=True, default="N/A")
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
@@ -266,6 +288,20 @@ class ProjectChecklistState(Base):
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 
+class ClientReceivables(Base):
+    """Tracks scheduled deliverables/payments to take from clients (e.g., Server Payments) with one-time or monthly cycle reminders."""
+    __tablename__ = "client_receivables"
+    id = Column(String, primary_key=True, default=generate_uuid)
+    project_id = Column(String, ForeignKey("projects.id"), nullable=False)
+    item_name = Column(String, nullable=False)
+    amount = Column(Float, nullable=False, default=0.0)
+    frequency = Column(String, nullable=False, default="Custom Date") # "Monthly" or "Custom Date"
+    due_date = Column(String, nullable=False) # "YYYY-MM-DD"
+    is_done = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+
 # ==========================================
 #          TIMESHEETS & TASKS
 # ==========================================
@@ -284,8 +320,22 @@ class DeveloperTasks(Base):
     # Dev Specifics
     tech_stack = Column(String, nullable=True, default="N/A")
     github_link = Column(String, nullable=True, default="N/A")
+    github_pr_created = Column(String, nullable=True, default="No")
+    github_branch_name = Column(String, nullable=True, default="N/A")
+    github_commit_count = Column(Integer, nullable=True, default=0)
+    github_repo_name = Column(String, nullable=True, default="N/A")
     task_performed = Column(Text, nullable=True, default="N/A")
     tomorrow_plan = Column(Text, nullable=True, default="N/A")
+    
+    # Milestone/Task tracking & Categorization additions
+    sprint = Column(String, nullable=True, default="N/A")
+    module = Column(String, nullable=True, default="N/A")
+    feature = Column(String, nullable=True, default="N/A")
+    ticket_id = Column(String, nullable=True, default="N/A")
+    no_project_reason = Column(Text, nullable=True, default="N/A")
+    task_status = Column(String, nullable=True, default="Completed")
+    work_type = Column(String, nullable=True, default="Development")
+    was_deployed = Column(String, nullable=True, default="No")
     
     # Auto-calculated Financials
     employee_cost = Column(Float, nullable=True, default=0.0)
@@ -317,6 +367,17 @@ class ContentCreatorTasks(Base):
     # Auto-calculated Financials
     hours_logged = Column(Float, nullable=False, default=0.0)
     task_performed = Column(Text, nullable=True, default="N/A")
+    
+    # Milestone/Task tracking & Categorization additions
+    sprint = Column(String, nullable=True, default="N/A")
+    module = Column(String, nullable=True, default="N/A")
+    feature = Column(String, nullable=True, default="N/A")
+    ticket_id = Column(String, nullable=True, default="N/A")
+    no_project_reason = Column(Text, nullable=True, default="N/A")
+    task_status = Column(String, nullable=True, default="Completed")
+    work_type = Column(String, nullable=True, default="Development")
+    was_deployed = Column(String, nullable=True, default="No")
+    
     employee_cost = Column(Float, nullable=True, default=0.0)
     billing_amount = Column(Float, nullable=True, default=0.0)
     profit_loss = Column(Float, nullable=True, default=0.0)
@@ -345,6 +406,39 @@ class LeaveRequest(Base):
     start_date = Column(DateTime, nullable=False)
     end_date = Column(DateTime, nullable=False)
     reason = Column(Text, nullable=False)
-    status = Column(String, nullable=False, default="Pending") # Pending, Approved, Rejected
+    status = Column(String, nullable=False, default="Pending") # Pending, Approved, Rejected, Cancelled, Cancellation Requested
+    leave_type = Column(String, nullable=True, default="Paid Leave")
+    half_day_option = Column(String, nullable=True, default="Full Day")
+    total_days = Column(Float, nullable=True, default=1.0)
+    pending_work_summary = Column(Text, nullable=True, default="N/A")
+    backup_employee_id = Column(String, nullable=True, default="N/A")
+    deployment_pending = Column(String, nullable=True, default="No")
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+class InAppNotification(Base):
+    __tablename__ = "inapp_notifications"
+    id = Column(String, primary_key=True, default=generate_uuid)
+    user_id = Column(String, nullable=False)
+    title = Column(String, nullable=False)
+    message = Column(Text, nullable=False)
+    is_read = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.now)
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+    id = Column(String, primary_key=True, default=generate_uuid)
+    user_id = Column(String, nullable=False)
+    action = Column(String, nullable=False)
+    target_id = Column(String, nullable=True)
+    details = Column(Text, nullable=True)
+    timestamp = Column(DateTime, default=datetime.now)
+
+class CompanyHoliday(Base):
+    __tablename__ = "company_holidays"
+    id = Column(String, primary_key=True, default=generate_uuid)
+    name = Column(String, nullable=False)
+    date = Column(String, nullable=False)  # Format: YYYY-MM-DD
+    holiday_type = Column(String, nullable=False)  # 'Public' or 'Company'
+    created_at = Column(DateTime, default=datetime.now)
+

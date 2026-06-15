@@ -1,18 +1,28 @@
+from openpyxl.descriptors import String
 import os
 import logging
 from contextlib import asynccontextmanager
+# pyrefly: ignore [missing-import]
 from fastapi.middleware.cors import CORSMiddleware
+# pyrefly: ignore [missing-import]
 from fastapi.responses import JSONResponse
+# pyrefly: ignore [missing-import]
 from fastapi import FastAPI
+# pyrefly: ignore [missing-import]
 from fastapi.staticfiles import StaticFiles
+# pyrefly: ignore [missing-import]
 from src.endpoints.websockets import manager
+# pyrefly: ignore [missing-import]
 from fastapi import Request
+# pyrefly: ignore [missing-import]
+from sqlalchemy import text
 
 # Endpoints mapping
 from src.endpoints import auth, employees, projects, tasks, uploads, dashboard, attendance, websockets, clients, checklists
 
 # Database mapping for Seeding
 from src.database.database_create import SessionLocal, engine
+# pyrefly: ignore [missing-import]
 from src.database.database_tables import Base, Admins
 
 # FIX: Import get_password_hash from database_operations instead of auth
@@ -34,8 +44,6 @@ if not os.path.exists("data"):
 async def lifespan(app: FastAPI):
     # Ensure all tables are created (Safe to call, won't drop existing data)
     Base.metadata.create_all(bind=engine)
-    
-    # Check for First-Time Setup
     with SessionLocal() as session:
         try:
             admin_count = session.query(Admins).count()
@@ -44,7 +52,7 @@ async def lifespan(app: FastAPI):
                 default_admin = Admins(
                     username="superadmin",
                     password=get_password_hash("DefaultPassword123!"),
-                    email="systemadmin@yanaos.com",
+                    email="[EMAIL_ADDRESS]",
                     full_name="SuperAdmin",
                     access_level="SystemAdmin"
                 )
@@ -110,6 +118,19 @@ async def broadcast_middleware(request: Request, call_next):
             if "/auth/login" not in request.url.path:
                 await manager.broadcast({"action": "REFRESH_WORKSPACE"})
     return response
+
+@app.middleware("http")
+async def db_connection_cleanup_middleware(request: Request, call_next):
+    try:
+        response = await call_next(request)
+        return response
+    finally:
+        try:
+            from src.database.database_create import engine, DATABASE_URL
+            if DATABASE_URL and isinstance(DATABASE_URL, str) and DATABASE_URL.startswith("postgres"):
+                engine.dispose(close_all_connections=False)
+        except Exception as e:
+            logger.error(f"Error disposing database engine: {str(e)}")
 
 if __name__ == "__main__":
     # pyrefly: ignore [missing-import]

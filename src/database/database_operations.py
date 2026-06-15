@@ -18,7 +18,7 @@ from .database_tables import (
     Departments_Roles, Admins, Employees, LoginHistory, Managers,
     Projects, SRS_Documents, ProjectTimeline, ProjectAssignments, MilestoneAssignments,
     DeveloperTasks, ContentCreatorTasks, ProjectExpenses, Attendance, LeaveRequest, ProjectPayments,
-    ChecklistTemplate, ProjectChecklistState
+    ChecklistTemplate, ProjectChecklistState, AuditLog, InAppNotification, ClientReceivables
 )
 # ==========================================
 #              LOGGING SETUP
@@ -50,7 +50,37 @@ class DatabaseOperations:
         """Safely converts a SQLAlchemy model instance to a Python dictionary."""
         if not obj:
             return {}
-        return {c.key: getattr(obj, c.key) for c in inspect(obj).mapper.column_attrs}
+        res = {c.key: getattr(obj, c.key) for c in inspect(obj).mapper.column_attrs}
+        # Decrypt Aadhaar and PAN if present in the model dictionary
+        if "adhar_number" in res and res["adhar_number"]:
+            from .encryption import decrypt_data
+            res["adhar_number"] = decrypt_data(res["adhar_number"])
+            res["aadhaar_number"] = res["adhar_number"]
+        elif "adhar_number" in res:
+            res["aadhaar_number"] = res["adhar_number"]
+        if "pan_number" in res and res["pan_number"]:
+            from .encryption import decrypt_data
+            res["pan_number"] = decrypt_data(res["pan_number"])
+        return res
+
+    def write_audit_log(self, user_id: str, action: str, target_id: str = None, details: dict = None) -> str:
+        """Writes an audit log entry to the database."""
+        with self.SessionLocal() as session:
+            try:
+                details_str = json.dumps(details) if details else None
+                new_log = AuditLog(
+                    user_id=user_id,
+                    action=action,
+                    target_id=target_id,
+                    details=details_str
+                )
+                session.add(new_log)
+                session.commit()
+                session.refresh(new_log)
+                return json.dumps(self.model_to_dict(new_log), indent=4, default=str)
+            except Exception as e:
+                session.rollback()
+                return self._handle_error("write_audit_log", e)
 
     def _parse_datetime(self, val: str) -> Optional[datetime]:
         """
@@ -290,6 +320,17 @@ class DatabaseOperations:
                 # Remove extra fields not in table
                 data.pop("department", None)
 
+                # Map aadhaar_number to adhar_number if present
+                if "aadhaar_number" in data:
+                    data["adhar_number"] = data.pop("aadhaar_number")
+
+                # Encrypt Aadhaar & PAN before database write
+                from .encryption import encrypt_data
+                if "adhar_number" in data and data["adhar_number"]:
+                    data["adhar_number"] = encrypt_data(data["adhar_number"])
+                if "pan_number" in data and data["pan_number"]:
+                    data["pan_number"] = encrypt_data(data["pan_number"])
+
                 # 3. Insert Database Record
                 new_employee = Employees(**data)
                 session.add(new_employee)
@@ -324,11 +365,18 @@ class DatabaseOperations:
                 employee = session.query(Employees).filter_by(id=employee_id).first()
                 if not employee:
                     return json.dumps({"error": f"Employee {employee_id} not found."})
-                
+
+                # Map aadhaar_number to adhar_number if present
+                if "aadhaar_number" in data:
+                    data["adhar_number"] = data.pop("aadhaar_number")
+
+                from .encryption import encrypt_data
                 for key, value in data.items():
                     if hasattr(employee, key):
                         if key == "password":
                             value = get_password_hash(value)
+                        elif key in ("adhar_number", "pan_number") and value:
+                            value = encrypt_data(value)
                         setattr(employee, key, value)
                 
                 # Auto-recalculate hourly cost rate when salary is edited
@@ -399,6 +447,23 @@ class DatabaseOperations:
                 if attendance.check_out_time is not None:
                     return json.dumps({"error": "Access Denied: You cannot log tasks after checking out."})
 
+                # Check 24 hours daily limit for timesheet entries
+                dev_hours_today = session.query(func.sum(DeveloperTasks.hours_logged)).filter(
+                    DeveloperTasks.employee_id == employee_id,
+                    DeveloperTasks.date.between(start_of_day, end_of_day)
+                ).scalar() or 0.0
+                
+                content_hours_today = session.query(func.sum(ContentCreatorTasks.hours_logged)).filter(
+                    ContentCreatorTasks.employee_id == employee_id,
+                    ContentCreatorTasks.date.between(start_of_day, end_of_day)
+                ).scalar() or 0.0
+                
+                existing_hours_today = float(dev_hours_today) + float(content_hours_today)
+                hours_logged = float(data.get("hours_logged", 0.0))
+                
+                if existing_hours_today + hours_logged > 24.0:
+                    return json.dumps({"error": f"Daily limit exceeded: You have already logged {existing_hours_today} hours on this date. Logging {hours_logged} hours would exceed the 24 hours daily limit."})
+
                 # Store the parsed datetime in data
                 data["date"] = task_date
 
@@ -432,6 +497,46 @@ class DatabaseOperations:
                 # Save Task
                 new_task = DeveloperTasks(**data)
                 session.add(new_task)
+                
+                # Check for deployment and notify/create expense
+                was_deployed = data.get("was_deployed", "No")
+                project_id = data.get("project_id")
+                if was_deployed == "Yes" and project_id:
+                    dev_deploy_count = session.query(DeveloperTasks).filter(
+                        DeveloperTasks.project_id == project_id,
+                        DeveloperTasks.was_deployed == "Yes"
+                    ).count()
+                    content_deploy_count = session.query(ContentCreatorTasks).filter(
+                        ContentCreatorTasks.project_id == project_id,
+                        ContentCreatorTasks.was_deployed == "Yes"
+                    ).count()
+                    is_first_deploy = (dev_deploy_count == 0 and content_deploy_count == 0)
+                    
+                    emp_name = employee.full_name if employee else "Employee"
+                    t_id = data.get("ticket_id") or "N/A"
+                    expense_data = ProjectExpenses(
+                        project_id=project_id,
+                        expense_name=f"Deployment - {t_id}",
+                        amount=0.0,
+                        expense_date=datetime.now().strftime("%Y-%m-%d"),
+                        description=f"Auto-generated deployment expense by {emp_name} for task {t_id}."
+                    )
+                    session.add(expense_data)
+                    
+                    if is_first_deploy:
+                        proj = session.query(Projects).filter_by(id=project_id).first()
+                        proj_name = proj.name if proj else "Unknown Project"
+                        mgr_name = proj.manager if proj else None
+                        
+                        admins = session.query(Admins).all()
+                        for admin in admins:
+                            new_notif = InAppNotification(
+                                user_id=admin.id,
+                                title="First Project Deployment",
+                                message=f"Project '{proj_name}' has received its first deployment by {emp_name} (Task: {t_id}). Please verify the deployment.",
+                                is_read=False
+                            )
+                            session.add(new_notif)
                 
                 # Check and update milestone status and actual_start date
                 milestone_id = data.get("milestone_id")
@@ -507,6 +612,23 @@ class DatabaseOperations:
                 if attendance.check_out_time is not None:
                     return json.dumps({"error": "Access Denied: You cannot log tasks after checking out."})
 
+                # Check 24 hours daily limit for timesheet entries
+                dev_hours_today = session.query(func.sum(DeveloperTasks.hours_logged)).filter(
+                    DeveloperTasks.employee_id == employee_id,
+                    DeveloperTasks.date.between(start_of_day, end_of_day)
+                ).scalar() or 0.0
+                
+                content_hours_today = session.query(func.sum(ContentCreatorTasks.hours_logged)).filter(
+                    ContentCreatorTasks.employee_id == employee_id,
+                    ContentCreatorTasks.date.between(start_of_day, end_of_day)
+                ).scalar() or 0.0
+                
+                existing_hours_today = float(dev_hours_today) + float(content_hours_today)
+                hours_logged = float(data.get("hours_logged", 0.0))
+                
+                if existing_hours_today + hours_logged > 24.0:
+                    return json.dumps({"error": f"Daily limit exceeded: You have already logged {existing_hours_today} hours on this date. Logging {hours_logged} hours would exceed the 24 hours daily limit."})
+
                 # Store the parsed datetime in data
                 data["date"] = task_date
 
@@ -547,6 +669,46 @@ class DatabaseOperations:
                 # Save Task
                 new_task = ContentCreatorTasks(**data)
                 session.add(new_task)
+                
+                # Check for deployment and notify/create expense
+                was_deployed = data.get("was_deployed", "No")
+                project_id = data.get("project_id")
+                if was_deployed == "Yes" and project_id:
+                    dev_deploy_count = session.query(DeveloperTasks).filter(
+                        DeveloperTasks.project_id == project_id,
+                        DeveloperTasks.was_deployed == "Yes"
+                    ).count()
+                    content_deploy_count = session.query(ContentCreatorTasks).filter(
+                        ContentCreatorTasks.project_id == project_id,
+                        ContentCreatorTasks.was_deployed == "Yes"
+                    ).count()
+                    is_first_deploy = (dev_deploy_count == 0 and content_deploy_count == 0)
+                    
+                    emp_name = employee.full_name if employee else "Employee"
+                    t_id = data.get("ticket_id") or "N/A"
+                    expense_data = ProjectExpenses(
+                        project_id=project_id,
+                        expense_name=f"Deployment - {t_id}",
+                        amount=0.0,
+                        expense_date=datetime.now().strftime("%Y-%m-%d"),
+                        description=f"Auto-generated deployment expense by {emp_name} for task {t_id}."
+                    )
+                    session.add(expense_data)
+                    
+                    if is_first_deploy:
+                        proj = session.query(Projects).filter_by(id=project_id).first()
+                        proj_name = proj.name if proj else "Unknown Project"
+                        mgr_name = proj.manager if proj else None
+                        
+                        admins = session.query(Admins).all()
+                        for admin in admins:
+                            new_notif = InAppNotification(
+                                user_id=admin.id,
+                                title="First Project Deployment",
+                                message=f"Project '{proj_name}' has received its first deployment by {emp_name} (Task: {t_id}). Please verify the deployment.",
+                                is_read=False
+                            )
+                            session.add(new_notif)
                 
                 # Check and update milestone status and actual_start date
                 milestone_id = data.get("milestone_id")
@@ -828,6 +990,26 @@ class DatabaseOperations:
                 return json.dumps(res_list, indent=4, default=str)
             except Exception as e:
                 return self._handle_error("get_project_timeline", e, context={"project_id": project_id})
+
+    def get_employee_assigned_milestones(self, employee_id: str) -> str:
+        with self.SessionLocal() as session:
+            try:
+                results = session.query(ProjectTimeline, Projects.name).join(
+                    MilestoneAssignments, ProjectTimeline.id == MilestoneAssignments.milestone_id
+                ).join(
+                    Projects, ProjectTimeline.project_id == Projects.id
+                ).filter(
+                    MilestoneAssignments.employee_id == employee_id
+                ).order_by(ProjectTimeline.expected_start).all()
+                
+                res_list = []
+                for milestone, project_name in results:
+                    m_dict = self.model_to_dict(milestone)
+                    m_dict['projectName'] = project_name
+                    res_list.append(m_dict)
+                return json.dumps(res_list, indent=4, default=str)
+            except Exception as e:
+                return self._handle_error("get_employee_assigned_milestones", e, context={"employee_id": employee_id})
                 
     def assign_employee_to_milestone(self, data: dict) -> str:
         with self.SessionLocal() as session:
@@ -841,6 +1023,21 @@ class DatabaseOperations:
                 
                 new_assignment = MilestoneAssignments(**data)
                 session.add(new_assignment)
+                
+                # Fetch milestone and project details to construct the notification message
+                milestone = session.query(ProjectTimeline).filter_by(id=data.get("milestone_id")).first()
+                if milestone:
+                    proj = session.query(Projects).filter_by(id=milestone.project_id).first()
+                    proj_name = proj.name if proj else "Unknown Project"
+                    
+                    new_notif = InAppNotification(
+                        user_id=data.get("employee_id"),
+                        title="New Milestone Assignment",
+                        message=f"You have been assigned to milestone '{milestone.milestone_name}' in project '{proj_name}'.",
+                        is_read=False
+                    )
+                    session.add(new_notif)
+
                 session.commit()
                 session.refresh(new_assignment)
                 return json.dumps(self.model_to_dict(new_assignment), indent=4, default=str)
@@ -942,6 +1139,21 @@ class DatabaseOperations:
             except Exception as e:
                 session.rollback()
                 return self._handle_error("unassign_employee", e, context={"assignment_id": assignment_id})
+
+    def edit_project_assignment(self, assignment_id: str, data: dict) -> str:
+        with self.SessionLocal() as session:
+            try:
+                assignment = session.query(ProjectAssignments).filter_by(id=assignment_id).first()
+                if not assignment:
+                    return json.dumps({"error": "Assignment not found."})
+                for key, value in data.items():
+                    setattr(assignment, key, value)
+                session.commit()
+                session.refresh(assignment)
+                return json.dumps(self.model_to_dict(assignment), indent=4, default=str)
+            except Exception as e:
+                session.rollback()
+                return self._handle_error("edit_project_assignment", e, context=data)
 
     def get_employee_projects(self, employee_id: str) -> str:
         with self.SessionLocal() as session:
@@ -1233,13 +1445,17 @@ class DatabaseOperations:
                 writer.writerow(["=== DEVELOPER TIMESHEETS ==="])
                 writer.writerow([
                     "Task ID", "Employee Name", "Date Logged", "Hours Logged", "Tech Stack Used", 
-                    "GitHub Link", "Task Performed", "Tomorrow's Plan", "Employee Cost", "Billing Amount", "Profit/Loss", "Logged At"
+                    "GitHub Link", "PR Created?", "Branch Name", "Commit Count", "Repository", "Task Performed", "Tomorrow's Plan", "Task Status", "Work Type", 
+                    "Sprint", "Module", "Feature", "Ticket ID", "No Project Reason", 
+                    "Employee Cost", "Billing Amount", "Profit/Loss", "Logged At"
                 ])
                 if dev_tasks:
                     for dt, emp in dev_tasks:
                         writer.writerow([
                             dt.id, emp.full_name, dt.date, dt.hours_logged, dt.tech_stack,
-                            dt.github_link, dt.task_performed, dt.tomorrow_plan, dt.employee_cost, dt.billing_amount, dt.profit_loss, dt.created_at
+                            dt.github_link, getattr(dt, 'github_pr_created', 'No'), getattr(dt, 'github_branch_name', 'N/A'), getattr(dt, 'github_commit_count', 0), getattr(dt, 'github_repo_name', 'N/A'), dt.task_performed, dt.tomorrow_plan, getattr(dt, 'task_status', 'Completed'), getattr(dt, 'work_type', 'Development'),
+                            getattr(dt, 'sprint', 'N/A'), getattr(dt, 'module', 'N/A'), getattr(dt, 'feature', 'N/A'), getattr(dt, 'ticket_id', 'N/A'), getattr(dt, 'no_project_reason', 'N/A'),
+                            dt.employee_cost, dt.billing_amount, dt.profit_loss, dt.created_at
                         ])
                 else:
                     writer.writerow(["No developer tasks logged."])
@@ -1250,6 +1466,7 @@ class DatabaseOperations:
                 writer.writerow([
                     "Task ID", "Employee Name", "Date Logged", "Hours Logged", "Reels Count", "Long Video Count",
                     "Poster Count", "Calls Made", "Platform", "Total Content", "Task Performed", 
+                    "Task Status", "Work Type", "Sprint", "Module", "Feature", "Ticket ID", "No Project Reason", 
                     "Employee Cost", "Billing Amount", "Profit/Loss", "Logged At"
                 ])
                 if content_tasks:
@@ -1257,6 +1474,7 @@ class DatabaseOperations:
                         writer.writerow([
                             ct.id, emp.full_name, ct.date, ct.hours_logged, ct.reels_count, ct.long_video_count,
                             ct.poster_count, ct.calls_made, ct.platform, ct.total_content, ct.task_performed,
+                            getattr(ct, 'task_status', 'Completed'), getattr(ct, 'work_type', 'Development'), getattr(ct, 'sprint', 'N/A'), getattr(ct, 'module', 'N/A'), getattr(ct, 'feature', 'N/A'), getattr(ct, 'ticket_id', 'N/A'), getattr(ct, 'no_project_reason', 'N/A'),
                             ct.employee_cost, ct.billing_amount, ct.profit_loss, ct.created_at
                         ])
                 else:
@@ -1552,7 +1770,9 @@ class DatabaseOperations:
                 # 6. Developer Timesheets
                 dev_headers = [
                     "Task ID", "Employee Name", "Date Logged", "Hours Logged", "Tech Stack Used", 
-                    "GitHub Link", "Task Performed", "Tomorrow's Plan", "Employee Cost", "Billing Amount", "Profit/Loss", "Logged At"
+                    "GitHub Link", "PR Created?", "Branch Name", "Commit Count", "Repository", "Task Performed", "Tomorrow's Plan", "Task Status", "Work Type", 
+                    "Sprint", "Module", "Feature", "Ticket ID", "No Project Reason", 
+                    "Employee Cost", "Billing Amount", "Profit/Loss", "Logged At"
                 ]
                 dev_rows = []
                 for dt, emp in dev_tasks:
@@ -1560,14 +1780,18 @@ class DatabaseOperations:
                     created_at = fmt_dt(dt.created_at)
                     dev_rows.append([
                         dt.id, emp.full_name, dt_date, dt.hours_logged or 0.0, dt.tech_stack or "N/A",
-                        dt.github_link or "N/A", dt.task_performed or "N/A", dt.tomorrow_plan or "N/A",
+                        dt.github_link or "N/A", getattr(dt, 'github_pr_created', 'No'), getattr(dt, 'github_branch_name', 'N/A'), getattr(dt, 'github_commit_count', 0), getattr(dt, 'github_repo_name', 'N/A'), dt.task_performed or "N/A", dt.tomorrow_plan or "N/A",
+                        getattr(dt, 'task_status', 'Completed'), getattr(dt, 'work_type', 'Development'),
+                        getattr(dt, 'sprint', 'N/A'), getattr(dt, 'module', 'N/A'), getattr(dt, 'feature', 'N/A'), getattr(dt, 'ticket_id', 'N/A'), getattr(dt, 'no_project_reason', 'N/A'),
                         dt.employee_cost or 0.0, dt.billing_amount or 0.0, dt.profit_loss or 0.0, created_at
                     ])
                 dev_alignments = [
                     center_align, left_align, center_align, right_align, center_align,
-                    left_align, left_align, left_align, right_align, right_align, right_align, center_align
+                    left_align, left_align, left_align, center_align, center_align,
+                    center_align, center_align, center_align, center_align, left_align,
+                    right_align, right_align, right_align, center_align
                 ]
-                dev_formats = {3: "0.0", 8: "₹#,##0.00", 9: "₹#,##0.00", 10: "₹#,##0.00"}
+                dev_formats = {3: "0.0", 15: "₹#,##0.00", 16: "₹#,##0.00", 17: "₹#,##0.00"}
                 
                 write_sheet("Developer Timesheets", dev_headers, dev_rows, dev_alignments, dev_formats)
 
@@ -1575,6 +1799,7 @@ class DatabaseOperations:
                 content_headers = [
                     "Task ID", "Employee Name", "Date Logged", "Hours Logged", "Reels Count", "Long Video Count",
                     "Poster Count", "Calls Made", "Platform", "Total Content", "Task Performed", 
+                    "Task Status", "Work Type", "Sprint", "Module", "Feature", "Ticket ID", "No Project Reason",
                     "Employee Cost", "Billing Amount", "Profit/Loss", "Logged At"
                 ]
                 content_rows = []
@@ -1584,14 +1809,17 @@ class DatabaseOperations:
                     content_rows.append([
                         ct.id, emp.full_name, ct_date, ct.hours_logged or 0.0, ct.reels_count or 0, ct.long_video_count or 0,
                         ct.poster_count or 0, ct.calls_made or 0, ct.platform or "N/A", ct.total_content or 0, ct.task_performed or "N/A",
+                        getattr(ct, 'task_status', 'Completed'), getattr(ct, 'work_type', 'Development'),
+                        getattr(ct, 'sprint', 'N/A'), getattr(ct, 'module', 'N/A'), getattr(ct, 'feature', 'N/A'), getattr(ct, 'ticket_id', 'N/A'), getattr(ct, 'no_project_reason', 'N/A'),
                         ct.employee_cost or 0.0, ct.billing_amount or 0.0, ct.profit_loss or 0.0, created_at
                     ])
                 content_alignments = [
                     center_align, left_align, center_align, right_align, right_align, right_align,
                     right_align, right_align, center_align, right_align, left_align,
+                    center_align, center_align, center_align, center_align, center_align, center_align, left_align,
                     right_align, right_align, right_align, center_align
                 ]
-                content_formats = {3: "0.0", 4: "#,##0", 5: "#,##0", 6: "#,##0", 7: "#,##0", 9: "#,##0", 11: "₹#,##0.00", 12: "₹#,##0.00", 13: "₹#,##0.00"}
+                content_formats = {3: "0.0", 4: "#,##0", 5: "#,##0", 6: "#,##0", 7: "#,##0", 9: "#,##0", 18: "₹#,##0.00", 19: "₹#,##0.00", 20: "₹#,##0.00"}
                 
                 write_sheet("Content Creator Timesheets", content_headers, content_rows, content_alignments, content_formats)
 
@@ -1989,6 +2217,27 @@ class DatabaseOperations:
                 
                 # RE-CALCULATE FINANCIALS IF HOURS ARE EDITED
                 if 'hours_logged' in data:
+                    # check 24 hrs daily limit
+                    task_cal_date = task.date.date()
+                    start_of_day = datetime.combine(task_cal_date, datetime.min.time())
+                    end_of_day = datetime.combine(task_cal_date, datetime.max.time())
+                    
+                    dev_hours_today = session.query(func.sum(DeveloperTasks.hours_logged)).filter(
+                        DeveloperTasks.employee_id == task.employee_id,
+                        DeveloperTasks.id != task.id,
+                        DeveloperTasks.date.between(start_of_day, end_of_day)
+                    ).scalar() or 0.0
+                    
+                    content_hours_today = session.query(func.sum(ContentCreatorTasks.hours_logged)).filter(
+                        ContentCreatorTasks.employee_id == task.employee_id,
+                        ContentCreatorTasks.date.between(start_of_day, end_of_day)
+                    ).scalar() or 0.0
+                    
+                    existing_hours_today = float(dev_hours_today) + float(content_hours_today)
+                    new_hours = float(data['hours_logged'])
+                    if existing_hours_today + new_hours > 24.0:
+                        return json.dumps({"error": f"Daily limit exceeded: You have already logged {existing_hours_today} hours on this date. Setting this task to {new_hours} hours would exceed the 24 hours daily limit."})
+
                     employee = session.query(Employees).filter_by(id=task.employee_id).first()
                     if employee:
                         cost_rate = float(employee.hourly_cost_rate or 0.0)
@@ -2016,6 +2265,37 @@ class DatabaseOperations:
                 for key, value in data.items():
                     setattr(task, key, value)
                 
+                # RE-CALCULATE FINANCIALS IF HOURS ARE EDITED
+                if 'hours_logged' in data:
+                    # check 24 hrs daily limit
+                    task_cal_date = task.date.date()
+                    start_of_day = datetime.combine(task_cal_date, datetime.min.time())
+                    end_of_day = datetime.combine(task_cal_date, datetime.max.time())
+                    
+                    dev_hours_today = session.query(func.sum(DeveloperTasks.hours_logged)).filter(
+                        DeveloperTasks.employee_id == task.employee_id,
+                        DeveloperTasks.date.between(start_of_day, end_of_day)
+                    ).scalar() or 0.0
+                    
+                    content_hours_today = session.query(func.sum(ContentCreatorTasks.hours_logged)).filter(
+                        ContentCreatorTasks.employee_id == task.employee_id,
+                        ContentCreatorTasks.id != task.id,
+                        ContentCreatorTasks.date.between(start_of_day, end_of_day)
+                    ).scalar() or 0.0
+                    
+                    existing_hours_today = float(dev_hours_today) + float(content_hours_today)
+                    new_hours = float(data['hours_logged'])
+                    if existing_hours_today + new_hours > 24.0:
+                        return json.dumps({"error": f"Daily limit exceeded: You have already logged {existing_hours_today} hours on this date. Setting this task to {new_hours} hours would exceed the 24 hours daily limit."})
+
+                    employee = session.query(Employees).filter_by(id=task.employee_id).first()
+                    if employee:
+                        cost_rate = float(employee.hourly_cost_rate or 0.0)
+                        billing_rate = float(employee.hourly_billing_rate or 0.0)
+                        task.employee_cost = float(task.hours_logged) * cost_rate
+                        task.billing_amount = float(task.hours_logged) * billing_rate
+                        task.profit_loss = task.billing_amount - task.employee_cost
+
                 # RE-CALCULATE TOTAL CONTENT IF COUNTS ARE EDITED
                 if any(k in data for k in ['reels_count', 'long_video_count', 'poster_count']):
                     task.total_content = (task.reels_count or 0) + (task.long_video_count or 0) + (task.poster_count or 0)
@@ -2312,24 +2592,98 @@ class DatabaseOperations:
             except Exception as e:
                 return self._handle_error("get_all_leave_requests", e)
 
-    def create_leave_request(self, employee_id: str, start_date: str, end_date: str, reason: str) -> str:
+    def create_leave_request(self, employee_id: str, start_date: str, end_date: str, reason: str,
+                             leave_type: str = "Paid Leave", half_day_option: str = "Full Day",
+                             total_days: float = 1.0, pending_work_summary: str = "N/A",
+                             backup_employee_id: str = "N/A", deployment_pending: str = "No") -> str:
         with self.SessionLocal() as session:
             try:
-                if isinstance(start_date, str):
-                    start_date = datetime.strptime(start_date, "%Y-%m-%d")
-                if isinstance(end_date, str):
-                    end_date = datetime.strptime(end_date, "%Y-%m-%d")
-                    
+                # 11. Add Mandatory Validation Rules:
+                # Reason Field: Min 15 chars, no empty spaces only.
+                stripped_reason = reason.strip()
+                if not stripped_reason:
+                    return json.dumps({"error": "Reason cannot be empty or contain only spaces."})
+                if len(stripped_reason) < 15:
+                    return json.dumps({"error": "Reason must be at least 15 characters long."})
+                if len(stripped_reason) > 500:
+                    return json.dumps({"error": "Reason cannot exceed 500 characters."})
+
+                # Date parsing
+                start_dt = self._parse_datetime(start_date) if isinstance(start_date, str) else start_date
+                end_dt = self._parse_datetime(end_date) if isinstance(end_date, str) else end_date
+                if not start_dt or not end_dt:
+                    return json.dumps({"error": "Invalid date format."})
+
+                # End date >= Start date
+                if end_dt.date() < start_dt.date():
+                    return json.dumps({"error": "End date cannot be before start date."})
+
+                # Cannot select past locked dates (start date cannot be before today's date)
+                if start_dt.date() < datetime.now().date():
+                    return json.dumps({"error": "Cannot apply for leave starting in the past."})
+
+                # Overlapping leave requests
+                overlapping = session.query(LeaveRequest).filter(
+                    LeaveRequest.employee_id == employee_id,
+                    LeaveRequest.status.in_(["Pending", "Approved", "Cancellation Requested"]),
+                    LeaveRequest.start_date <= end_dt,
+                    LeaveRequest.end_date >= start_dt
+                ).first()
+                if overlapping:
+                    if overlapping.status == "Approved":
+                        return json.dumps({"error": "You already have an approved leave request for overlapping dates."})
+                    else:
+                        return json.dumps({"error": "You already have a pending leave request for overlapping dates."})
+
                 new_request = LeaveRequest(
                     employee_id=employee_id,
-                    start_date=start_date,
-                    end_date=end_date,
+                    start_date=start_dt,
+                    end_date=end_dt,
                     reason=reason,
+                    leave_type=leave_type,
+                    half_day_option=half_day_option,
+                    total_days=total_days,
+                    pending_work_summary=pending_work_summary,
+                    backup_employee_id=backup_employee_id,
+                    deployment_pending=deployment_pending,
                     status="Pending"
                 )
                 session.add(new_request)
                 session.commit()
                 session.refresh(new_request)
+
+                # Write Audit Log
+                self.write_audit_log(
+                    user_id=employee_id,
+                    action="SUBMIT_LEAVE_REQUEST",
+                    target_id=new_request.id,
+                    details={"start_date": str(start_date), "end_date": str(end_date), "leave_type": leave_type}
+                )
+
+                # 10. Add Notification: Manager on new leave request
+                admins = session.query(Admins).all()
+                emp = session.query(Employees).filter_by(id=employee_id).first()
+                emp_name = emp.full_name if emp else "Employee"
+                for admin in admins:
+                    new_notif = InAppNotification(
+                        user_id=admin.id,
+                        title="New Leave Request",
+                        message=f"{emp_name} has applied for {leave_type} ({total_days} days) from {start_dt.strftime('%Y-%m-%d')} to {end_dt.strftime('%Y-%m-%d')}.",
+                        is_read=False
+                    )
+                    session.add(new_notif)
+
+                if backup_employee_id and backup_employee_id != "N/A":
+                    backup_notif = InAppNotification(
+                        user_id=backup_employee_id,
+                        title="Task Handover Assigned",
+                        message=f"{emp_name} has designated you as backup for their leave from {start_dt.strftime('%Y-%m-%d')} to {end_dt.strftime('%Y-%m-%d')}. Work Summary: {pending_work_summary}",
+                        is_read=False
+                    )
+                    session.add(backup_notif)
+
+                session.commit()
+
                 return json.dumps(self.model_to_dict(new_request), indent=4, default=str)
             except Exception as e:
                 session.rollback()
@@ -2343,19 +2697,397 @@ class DatabaseOperations:
             except Exception as e:
                 return self._handle_error("get_employee_leave_requests", e)
 
+    def get_backup_coverages_by_employee(self, employee_id: str) -> str:
+        with self.SessionLocal() as session:
+            try:
+                records = session.query(LeaveRequest).filter_by(backup_employee_id=employee_id).all()
+                res_list = []
+                for r in records:
+                    r_dict = self.model_to_dict(r)
+                    emp = session.query(Employees).filter_by(id=r.employee_id).first()
+                    r_dict['employee_name'] = emp.full_name if emp else "Employee"
+                    res_list.append(r_dict)
+                return json.dumps(res_list, indent=4, default=str)
+            except Exception as e:
+                return self._handle_error("get_backup_coverages_by_employee", e)
+
     def update_leave_request_status(self, leave_id: str, status: str) -> str:
         with self.SessionLocal() as session:
             try:
                 record = session.query(LeaveRequest).filter_by(id=leave_id).first()
                 if not record:
                     return json.dumps({"error": "Leave request not found."})
+                
+                old_status = record.status
                 record.status = status
                 session.commit()
                 session.refresh(record)
+
+                # Audit Log
+                self.write_audit_log(
+                    user_id="SYSTEM",
+                    action="UPDATE_LEAVE_STATUS",
+                    target_id=leave_id,
+                    details={"old_status": old_status, "new_status": status}
+                )
+
+                # 10. Notify Employee
+                emp_id = record.employee_id
+                emp = session.query(Employees).filter_by(id=emp_id).first()
+                emp_name = emp.full_name if emp else "Employee"
+                
+                new_notif = InAppNotification(
+                    user_id=emp_id,
+                    title=f"Leave Request {status}",
+                    message=f"Your leave request from {record.start_date.strftime('%Y-%m-%d')} to {record.end_date.strftime('%Y-%m-%d')} has been {status.lower()}.",
+                    is_read=False
+                )
+                session.add(new_notif)
+
+                if status == "Approved" and record.backup_employee_id and record.backup_employee_id != "N/A":
+                    backup_notif = InAppNotification(
+                        user_id=record.backup_employee_id,
+                        title="Task Handover Confirmed",
+                        message=f"Task Handover Confirmed: The leave request for {emp_name} from {record.start_date.strftime('%Y-%m-%d')} to {record.end_date.strftime('%Y-%m-%d')} has been approved. You are officially confirmed as the backup.",
+                        is_read=False
+                    )
+                    session.add(backup_notif)
+
+                session.commit()
+
                 return json.dumps(self.model_to_dict(record), indent=4, default=str)
             except Exception as e:
                 session.rollback()
                 return self._handle_error("update_leave_request_status", e)
+
+    def cancel_leave_request_by_employee(self, leave_id: str, employee_id: str) -> str:
+        with self.SessionLocal() as session:
+            try:
+                record = session.query(LeaveRequest).filter_by(id=leave_id, employee_id=employee_id).first()
+                if not record:
+                    return json.dumps({"error": "Leave request not found."})
+                
+                # Check if leave has already started or today is the start date
+                today = datetime.now().date()
+                leave_start = record.start_date.date()
+                if today >= leave_start:
+                    return json.dumps({"error": "Cannot cancel or request cancellation of a leave request on or after the day the leave starts."})
+                
+                if record.status == "Pending":
+                    # Direct cancel
+                    old_status = record.status
+                    record.status = "Cancelled"
+                    session.commit()
+                    self.write_audit_log(
+                        user_id=employee_id,
+                        action="CANCEL_LEAVE_REQUEST",
+                        target_id=leave_id,
+                        details={"old_status": old_status, "status": "Cancelled"}
+                    )
+                    return json.dumps(self.model_to_dict(record), indent=4, default=str)
+                elif record.status == "Approved":
+                    # Request cancellation
+                    old_status = record.status
+                    record.status = "Cancellation Requested"
+                    session.commit()
+                    self.write_audit_log(
+                        user_id=employee_id,
+                        action="REQUEST_LEAVE_CANCELLATION",
+                        target_id=leave_id,
+                        details={"old_status": old_status, "status": "Cancellation Requested"}
+                    )
+                    # Notify admin
+                    admins = session.query(Admins).all()
+                    emp = session.query(Employees).filter_by(id=employee_id).first()
+                    emp_name = emp.full_name if emp else "Employee"
+                    for admin in admins:
+                        new_notif = InAppNotification(
+                            user_id=admin.id,
+                            title="Leave Cancellation Requested",
+                            message=f"{emp_name} has requested to cancel their approved leave from {record.start_date.strftime('%Y-%m-%d')} to {record.end_date.strftime('%Y-%m-%d')}.",
+                            is_read=False
+                        )
+                        session.add(new_notif)
+                    session.commit()
+                    return json.dumps(self.model_to_dict(record), indent=4, default=str)
+                else:
+                    return json.dumps({"error": f"Cannot cancel a leave request in {record.status} status."})
+            except Exception as e:
+                session.rollback()
+                return self._handle_error("cancel_leave_request_by_employee", e)
+
+    def get_user_notifications(self, user_id: str) -> str:
+        with self.SessionLocal() as session:
+            try:
+                from datetime import datetime, timedelta
+                thirty_days_ago = datetime.now() - timedelta(days=30)
+                seven_days_ago = datetime.now() - timedelta(days=7)
+                
+                session.query(InAppNotification).filter(
+                    InAppNotification.user_id == user_id,
+                    InAppNotification.created_at < thirty_days_ago
+                ).delete(synchronize_session=False)
+                
+                session.query(InAppNotification).filter(
+                    InAppNotification.user_id == user_id,
+                    InAppNotification.is_read == True,
+                    InAppNotification.created_at < seven_days_ago
+                ).delete(synchronize_session=False)
+                
+                total_notifs = session.query(InAppNotification).filter_by(user_id=user_id).order_by(InAppNotification.created_at.desc()).all()
+                if len(total_notifs) > 50:
+                    excess_ids = [n.id for n in total_notifs[50:]]
+                    session.query(InAppNotification).filter(InAppNotification.id.in_(excess_ids)).delete(synchronize_session=False)
+                
+                session.commit()
+                
+                records = session.query(InAppNotification).filter_by(user_id=user_id).order_by(InAppNotification.created_at.desc()).all()
+                return json.dumps([self.model_to_dict(r) for r in records], indent=4, default=str)
+            except Exception as e:
+                session.rollback()
+                return self._handle_error("get_user_notifications", e)
+
+    def mark_notification_as_read(self, notif_id: str, user_id: str) -> str:
+        with self.SessionLocal() as session:
+            try:
+                record = session.query(InAppNotification).filter_by(id=notif_id, user_id=user_id).first()
+                if not record:
+                    return json.dumps({"error": "Notification not found."})
+                record.is_read = True
+                session.commit()
+                return json.dumps(self.model_to_dict(record), indent=4, default=str)
+            except Exception as e:
+                session.rollback()
+                return self._handle_error("mark_notification_as_read", e)
+
+    def get_company_holidays(self) -> str:
+        with self.SessionLocal() as session:
+            try:
+                from src.database.database_tables import CompanyHoliday
+                records = session.query(CompanyHoliday).order_by(CompanyHoliday.date.asc()).all()
+                return json.dumps([self.model_to_dict(r) for r in records], indent=4, default=str)
+            except Exception as e:
+                return self._handle_error("get_company_holidays", e)
+
+    def create_company_holiday(self, name: str, date: str, holiday_type: str) -> str:
+        with self.SessionLocal() as session:
+            try:
+                from src.database.database_tables import CompanyHoliday
+                new_holiday = CompanyHoliday(
+                    name=name,
+                    date=date,
+                    holiday_type=holiday_type
+                )
+                session.add(new_holiday)
+                session.commit()
+                session.refresh(new_holiday)
+                return json.dumps(self.model_to_dict(new_holiday), indent=4, default=str)
+            except Exception as e:
+                session.rollback()
+                return self._handle_error("create_company_holiday", e)
+
+    def delete_company_holiday(self, holiday_id: str) -> str:
+        with self.SessionLocal() as session:
+            try:
+                from src.database.database_tables import CompanyHoliday
+                record = session.query(CompanyHoliday).filter_by(id=holiday_id).first()
+                if not record:
+                    return json.dumps({"error": "Holiday not found."})
+                session.delete(record)
+                session.commit()
+                return json.dumps({"success": True, "message": "Holiday deleted successfully."})
+            except Exception as e:
+                session.rollback()
+                return self._handle_error("delete_company_holiday", e)
+
+    def bulk_update_working_hours(self, working_hours: float, employee_ids: list = None, department: str = None, role_id: str = None) -> str:
+        with self.SessionLocal() as session:
+            try:
+                from src.database.database_tables import Employees, Departments_Roles
+                query = session.query(Employees)
+                if employee_ids:
+                    query = query.filter(Employees.id.in_(employee_ids))
+                elif role_id:
+                    query = query.filter(Employees.role_id == role_id)
+                elif department:
+                    query = query.join(Departments_Roles, Employees.role_id == Departments_Roles.id).filter(Departments_Roles.department_name == department)
+                
+                count = 0
+                for emp in query.all():
+                    emp.working_hours = working_hours
+                    count += 1
+                session.commit()
+                return json.dumps({"success": True, "message": f"Updated working hours to {working_hours} for {count} employees."})
+            except Exception as e:
+                session.rollback()
+                return self._handle_error("bulk_update_working_hours", e)
+
+    def get_employee_assigned_milestones(self, employee_id: str) -> str:
+        with self.SessionLocal() as session:
+            try:
+                from src.database.database_tables import MilestoneAssignments, ProjectTimeline, Projects
+                query = session.query(
+                    ProjectTimeline.id.label("milestone_id"),
+                    ProjectTimeline.milestone_name.label("milestone_title"),
+                    ProjectTimeline.status.label("milestone_status"),
+                    ProjectTimeline.expected_start.label("expected_start"),
+                    ProjectTimeline.expected_end.label("expected_end"),
+                    ProjectTimeline.actual_start.label("actual_start"),
+                    ProjectTimeline.actual_end.label("actual_end"),
+                    ProjectTimeline.remarks.label("remarks"),
+                    Projects.id.label("project_id"),
+                    Projects.name.label("project_name")
+                ).join(
+                    MilestoneAssignments, ProjectTimeline.id == MilestoneAssignments.milestone_id
+                ).join(
+                    Projects, ProjectTimeline.project_id == Projects.id
+                ).filter(
+                    MilestoneAssignments.employee_id == employee_id
+                ).order_by(ProjectTimeline.expected_start.asc())
+                
+                results = []
+                for row in query.all():
+                    results.append({
+                        "id": row.milestone_id,
+                        "milestone_name": row.milestone_title,
+                        "status": row.milestone_status,
+                        "expected_start": str(row.expected_start) if row.expected_start else None,
+                        "expected_end": str(row.expected_end) if row.expected_end else None,
+                        "actual_start": str(row.actual_start) if row.actual_start else None,
+                        "actual_end": str(row.actual_end) if row.actual_end else None,
+                        "remarks": row.remarks,
+                        "project_id": row.project_id,
+                        "projectName": row.project_name
+                    })
+                return json.dumps(results, indent=4)
+            except Exception as e:
+                return self._handle_error("get_employee_assigned_milestones", e)
+
+    def edit_project_expense(self, expense_id: str, data: dict) -> str:
+        with self.SessionLocal() as session:
+            try:
+                from src.database.database_tables import ProjectExpenses
+                expense = session.query(ProjectExpenses).filter_by(id=expense_id).first()
+                if not expense:
+                    return json.dumps({"error": f"Expense not found."})
+                for key, value in data.items():
+                    setattr(expense, key, value)
+                session.commit()
+                session.refresh(expense)
+                return json.dumps(self.model_to_dict(expense), indent=4, default=str)
+            except Exception as e:
+                session.rollback()
+                return self._handle_error("edit_project_expense", e, context={"expense_id": expense_id, "data": data})
+
+    def get_all_project_assignments(self) -> str:
+        with self.SessionLocal() as session:
+            try:
+                from src.database.database_tables import ProjectAssignments, Employees
+                query = session.query(
+                    ProjectAssignments.project_id,
+                    Employees.full_name
+                ).join(
+                    Employees, ProjectAssignments.employee_id == Employees.id
+                )
+                
+                mapping = {}
+                for row in query.all():
+                    if row.project_id not in mapping:
+                        mapping[row.project_id] = []
+                    mapping[row.project_id].append(row.full_name)
+                return json.dumps(mapping, indent=4)
+            except Exception as e:
+                return self._handle_error("get_all_project_assignments", e)
+
+    # ==========================================
+    #           CLIENT RECEIVABLES
+    # ==========================================
+
+    def add_client_receivable(self, data: dict) -> str:
+        with self.SessionLocal() as session:
+            try:
+                from src.database.database_tables import ClientReceivables
+                new_rec = ClientReceivables(**data)
+                session.add(new_rec)
+                session.commit()
+                session.refresh(new_rec)
+                return json.dumps(self.model_to_dict(new_rec), indent=4, default=str)
+            except Exception as e:
+                session.rollback()
+                return self._handle_error("add_client_receivable", e, context=data)
+
+    def get_client_receivables(self, project_id: str) -> str:
+        with self.SessionLocal() as session:
+            try:
+                from src.database.database_tables import ClientReceivables
+                recs = session.query(ClientReceivables).filter_by(project_id=project_id).order_by(ClientReceivables.due_date.asc()).all()
+                return json.dumps([self.model_to_dict(r) for r in recs], indent=4, default=str)
+            except Exception as e:
+                return self._handle_error("get_client_receivables", e, context={"project_id": project_id})
+
+    def delete_client_receivable(self, receivable_id: str) -> str:
+        with self.SessionLocal() as session:
+            try:
+                from src.database.database_tables import ClientReceivables
+                rec = session.query(ClientReceivables).filter_by(id=receivable_id).first()
+                if not rec:
+                    return json.dumps({"error": "Receivable not found."})
+                session.delete(rec)
+                session.commit()
+                return json.dumps({"success": True})
+            except Exception as e:
+                session.rollback()
+                return self._handle_error("delete_client_receivable", e, context={"receivable_id": receivable_id})
+
+    def mark_client_receivable_done(self, receivable_id: str) -> str:
+        with self.SessionLocal() as session:
+            try:
+                from src.database.database_tables import ClientReceivables, ProjectPayments
+                import calendar
+                
+                rec = session.query(ClientReceivables).filter_by(id=receivable_id).first()
+                if not rec:
+                    return json.dumps({"error": "Receivable not found."})
+                
+                # Create a payment ledger entry if amount > 0
+                if rec.amount > 0:
+                    new_payment = ProjectPayments(
+                        project_id=rec.project_id,
+                        amount=rec.amount,
+                        payment_date=datetime.now(),
+                        payment_method="Bank Transfer",
+                        reference_number="AUTO-RECEIVABLE",
+                        remarks=f"Auto-generated payment from Client Receivable reminder: {rec.item_name}"
+                    )
+                    session.add(new_payment)
+                
+                if rec.frequency == "Monthly":
+                    # Parse current due date and add 1 month
+                    try:
+                        curr_date = datetime.strptime(rec.due_date, "%Y-%m-%d")
+                    except Exception:
+                        curr_date = datetime.now()
+                    
+                    # Custom standard-library logic to add exactly 1 month
+                    month = curr_date.month - 1 + 1
+                    year = curr_date.year + month // 12
+                    month = month % 12 + 1
+                    day = min(curr_date.day, calendar.monthrange(year, month)[1])
+                    next_date = datetime(year, month, day)
+                    
+                    rec.due_date = next_date.strftime("%Y-%m-%d")
+                    rec.is_done = False
+                else:
+                    rec.is_done = True
+                
+                session.commit()
+                session.refresh(rec)
+                return json.dumps(self.model_to_dict(rec), indent=4, default=str)
+            except Exception as e:
+                session.rollback()
+                return self._handle_error("mark_client_receivable_done", e, context={"receivable_id": receivable_id})
+
+
 
 
 

@@ -64,6 +64,15 @@ class EmployeeCreate(ConfiguredBaseModel):
     department: Optional[str] = "N/A"
     skills: Optional[str] = Field("[]", description="JSON string array or comma-separated string of skills")
     
+    # New Fields
+    account_holder_name: Optional[str] = "N/A"
+    pf_number: Optional[str] = "N/A"
+    esic_number: Optional[str] = "N/A"
+    tax_details: Optional[str] = "N/A"
+    compliance_verified: Optional[bool] = False
+    profile_edit_requested: Optional[bool] = False
+    profile_unlocked: Optional[bool] = False
+
     # Fallback to catch any remaining DB fields you want to pass on creation
     model_config = ConfigDict(extra="allow", from_attributes=True) 
 
@@ -77,6 +86,15 @@ class EmployeeUpdate(ConfiguredBaseModel):
     skills: Optional[str] = None
     is_active: Optional[bool] = None
     
+    # New Fields
+    account_holder_name: Optional[str] = None
+    pf_number: Optional[str] = None
+    esic_number: Optional[str] = None
+    tax_details: Optional[str] = None
+    compliance_verified: Optional[bool] = None
+    profile_edit_requested: Optional[bool] = None
+    profile_unlocked: Optional[bool] = None
+
     model_config = ConfigDict(extra="allow", from_attributes=True) 
 
 class ManagerCreate(ConfiguredBaseModel):
@@ -119,6 +137,10 @@ class ProjectCreate(ConfiguredBaseModel):
     assigned_to: Optional[str] = "N/A"
     team: Optional[str] = "N/A"
     srs_id: Optional[str] = Field(None, description="UUID of the linked SRS Document")
+    tech_stack: Optional[str] = Field("N/A", description="Pre-defined tech stack tags")
+    billing_cycle: Optional[str] = "N/A"
+    billing_rate: Optional[float] = 0.0
+    next_billing_date: Optional[str] = "N/A"
 
     model_config = ConfigDict(extra="allow")
 
@@ -142,6 +164,10 @@ class ProjectUpdate(ConfiguredBaseModel):
     assigned_to: Optional[str] = None
     team: Optional[str] = None
     srs_id: Optional[str] = None
+    tech_stack: Optional[str] = None
+    billing_cycle: Optional[str] = None
+    billing_rate: Optional[float] = None
+    next_billing_date: Optional[str] = None
     model_config = ConfigDict(extra="allow")
 
 class ProjectExpenseCreate(ConfiguredBaseModel):
@@ -150,6 +176,12 @@ class ProjectExpenseCreate(ConfiguredBaseModel):
     amount: float = Field(..., gt=0.0)
     expense_date: Optional[str] = "N/A"
     description: Optional[str] = "N/A"
+
+class ProjectExpenseUpdate(ConfiguredBaseModel):
+    expense_name: Optional[str] = None
+    amount: Optional[float] = Field(None, gt=0.0)
+    expense_date: Optional[str] = None
+    description: Optional[str] = None
 
 class ProjectPaymentCreate(ConfiguredBaseModel):
     project_id: str = Field(..., description="UUID of the Project")
@@ -168,6 +200,11 @@ class ProjectPaymentUpdate(ConfiguredBaseModel):
 class ProjectAssignmentCreate(ConfiguredBaseModel):
     project_id: str = Field(..., description="UUID of the Project")
     employee_id: str = Field(..., description="UUID of the Employee")
+    custom_hourly_cost: Optional[float] = Field(None, ge=0.0)
+    custom_hourly_billing: Optional[float] = Field(None, ge=0.0)
+
+class ProjectAssignmentUpdate(ConfiguredBaseModel):
+    custom_hourly_cost: Optional[float] = Field(None, ge=0.0)
     custom_hourly_billing: Optional[float] = Field(None, ge=0.0)
 
 class MilestoneAssignmentCreate(ConfiguredBaseModel):
@@ -186,6 +223,14 @@ class TimelineCreate(ConfiguredBaseModel):
     milestone_name: str = Field(..., description="E.g., Phase 1: UI Design")
     expected_start: Optional[datetime] = None
     expected_end: Optional[datetime] = None
+
+    # New Smart Fields
+    sprint_name: Optional[str] = "N/A"
+    module_name: Optional[str] = "N/A"
+    feature_name: Optional[str] = "N/A"
+    work_type: Optional[str] = "Backend"
+    repo_name: Optional[str] = "N/A"
+
     status: Optional[str] = "Pending"
     remarks: Optional[str] = "N/A"
 
@@ -214,15 +259,108 @@ class DeveloperTaskCreate(ConfiguredBaseModel):
     hours_logged: float = Field(..., gt=0.0, le=24.0, description="Must be greater than 0 and max 24")
     tech_stack: Optional[str] = "N/A"    
     github_link: Optional[str] = "N/A"
-    task_performed: str = Field(..., min_length=5, description="Description of the work done")
+    github_pr_created: Optional[str] = "No"
+    github_branch_name: Optional[str] = "N/A"
+    github_commit_count: Optional[int] = 0
+    github_repo_name: Optional[str] = "N/A"
+    task_performed: str = Field(..., min_length=20, max_length=5000, description="Description of the work done")
     tomorrow_plan: Optional[str] = "N/A"
+    
+    # Milestone/Task tracking & Categorization additions
+    sprint: Optional[str] = "N/A"
+    module: Optional[str] = "N/A"
+    feature: Optional[str] = "N/A"
+    ticket_id: Optional[str] = "N/A"
+    no_project_reason: Optional[str] = "N/A"
+    task_status: Optional[str] = "Completed"
+    work_type: Optional[str] = "Development"
+    was_deployed: Optional[str] = "No"
+
+    @field_validator('task_performed')
+    def validate_task_performed(cls, v):
+        if v is not None:
+            stripped = v.strip()
+            if not stripped:
+                raise ValueError("Execution details cannot be empty or only spaces.")
+            if len(stripped) < 20:
+                raise ValueError("Execution details must be at least 20 characters long.")
+            if len(stripped) > 5000:
+                raise ValueError("Execution details cannot exceed 5000 characters.")
+            if len(set(stripped)) < 5 and len(stripped) > 50:
+                raise ValueError("Invalid entry: Repeated spam characters detected.")
+        return v
+
+    @field_validator('github_link')
+    def validate_github_link(cls, v):
+        if v and v != "N/A":
+            if not v.startswith("https://"):
+                raise ValueError("GitHub/Git Link must start with https://")
+            allowed_domains = ["github.com", "gitlab.com", "bitbucket.org"]
+            if not any(domain in v for domain in allowed_domains):
+                raise ValueError("Accept only links from github.com, gitlab.com, or bitbucket.org")
+        return v
+
+    @field_validator('tech_stack')
+    def validate_tech_stack(cls, v):
+        if v and v != "N/A":
+            tags = [t.strip().lower() for t in v.split(",") if t.strip()]
+            if len(tags) > 15:
+                raise ValueError("Tech stack cannot exceed 15 tags.")
+            if len(tags) != len(set(tags)):
+                raise ValueError("Tech stack cannot contain duplicate tags.")
+        return v
 
 class DeveloperTaskUpdate(ConfiguredBaseModel):
     hours_logged: Optional[float] = Field(None, gt=0.0, le=24.0)
     tech_stack: Optional[str] = None
     github_link: Optional[str] = None
+    github_pr_created: Optional[str] = None
+    github_branch_name: Optional[str] = None
+    github_commit_count: Optional[int] = None
+    github_repo_name: Optional[str] = None
     task_performed: Optional[str] = None
     tomorrow_plan: Optional[str] = None
+    sprint: Optional[str] = None
+    module: Optional[str] = None
+    feature: Optional[str] = None
+    ticket_id: Optional[str] = None
+    no_project_reason: Optional[str] = None
+    task_status: Optional[str] = None
+    work_type: Optional[str] = None
+
+    @field_validator('task_performed')
+    def validate_task_performed(cls, v):
+        if v is not None:
+            stripped = v.strip()
+            if not stripped:
+                raise ValueError("Execution details cannot be empty or only spaces.")
+            if len(stripped) < 20:
+                raise ValueError("Execution details must be at least 20 characters long.")
+            if len(stripped) > 5000:
+                raise ValueError("Execution details cannot exceed 5000 characters.")
+            if len(set(stripped)) < 5 and len(stripped) > 50:
+                raise ValueError("Invalid entry: Repeated spam characters detected.")
+        return v
+
+    @field_validator('github_link')
+    def validate_github_link(cls, v):
+        if v and v != "N/A":
+            if not v.startswith("https://"):
+                raise ValueError("GitHub/Git Link must start with https://")
+            allowed_domains = ["github.com", "gitlab.com", "bitbucket.org"]
+            if not any(domain in v for domain in allowed_domains):
+                raise ValueError("Accept only links from github.com, gitlab.com, or bitbucket.org")
+        return v
+
+    @field_validator('tech_stack')
+    def validate_tech_stack(cls, v):
+        if v and v != "N/A":
+            tags = [t.strip().lower() for t in v.split(",") if t.strip()]
+            if len(tags) > 15:
+                raise ValueError("Tech stack cannot exceed 15 tags.")
+            if len(tags) != len(set(tags)):
+                raise ValueError("Tech stack cannot contain duplicate tags.")
+        return v
 
 class ContentTaskCreate(ConfiguredBaseModel):
     """
@@ -235,19 +373,66 @@ class ContentTaskCreate(ConfiguredBaseModel):
     date: Optional[datetime] = Field(default_factory=datetime.now)
 
     hours_logged: float = Field(..., gt=0.0, le=24.0, description="Must be greater than 0 and max 24")
-    task_performed: str = Field(..., min_length=5, description="Description of the work done")    
+    task_performed: str = Field(..., min_length=20, max_length=5000, description="Description of the work done")    
     reels_count: Optional[int] = Field(0, ge=0, description="Cannot be negative")
     long_video_count: Optional[int] = Field(0, ge=0, description="Cannot be negative")
     poster_count: Optional[int] = Field(0, ge=0, description="Cannot be negative")
     calls_made: Optional[int] = Field(0, ge=0, description="Cannot be negative")
     platform: Optional[str] = "N/A"
+    
+    # Milestone/Task tracking & Categorization additions
+    sprint: Optional[str] = "N/A"
+    module: Optional[str] = "N/A"
+    feature: Optional[str] = "N/A"
+    ticket_id: Optional[str] = "N/A"
+    no_project_reason: Optional[str] = "N/A"
+    task_status: Optional[str] = "Completed"
+    work_type: Optional[str] = "Development"
+    was_deployed: Optional[str] = "No"
+
+    @field_validator('task_performed')
+    def validate_task_performed(cls, v):
+        if v is not None:
+            stripped = v.strip()
+            if not stripped:
+                raise ValueError("Execution details cannot be empty or only spaces.")
+            if len(stripped) < 20:
+                raise ValueError("Execution details must be at least 20 characters long.")
+            if len(stripped) > 5000:
+                raise ValueError("Execution details cannot exceed 5000 characters.")
+            if len(set(stripped)) < 5 and len(stripped) > 50:
+                raise ValueError("Invalid entry: Repeated spam characters detected.")
+        return v
 
 class ContentTaskUpdate(ConfiguredBaseModel):
+    hours_logged: Optional[float] = Field(None, gt=0.0, le=24.0)
+    task_performed: Optional[str] = None
     reels_count: Optional[int] = Field(None, ge=0)
     long_video_count: Optional[int] = Field(None, ge=0)
     poster_count: Optional[int] = Field(None, ge=0)
     calls_made: Optional[int] = Field(None, ge=0)
     platform: Optional[str] = None
+    sprint: Optional[str] = None
+    module: Optional[str] = None
+    feature: Optional[str] = None
+    ticket_id: Optional[str] = None
+    no_project_reason: Optional[str] = None
+    task_status: Optional[str] = None
+    work_type: Optional[str] = None
+
+    @field_validator('task_performed')
+    def validate_task_performed(cls, v):
+        if v is not None:
+            stripped = v.strip()
+            if not stripped:
+                raise ValueError("Execution details cannot be empty or only spaces.")
+            if len(stripped) < 20:
+                raise ValueError("Execution details must be at least 20 characters long.")
+            if len(stripped) > 5000:
+                raise ValueError("Execution details cannot exceed 5000 characters.")
+            if len(set(stripped)) < 5 and len(stripped) > 50:
+                raise ValueError("Invalid entry: Repeated spam characters detected.")
+        return v
 
 # ==========================================
 #          EXTENDED UPDATE SCHEMAS
@@ -268,6 +453,13 @@ class TimelineUpdate(ConfiguredBaseModel):
     status: Optional[str] = None
     remarks: Optional[str] = None
 
+    # New Smart Fields
+    sprint_name: Optional[str] = None
+    module_name: Optional[str] = None
+    feature_name: Optional[str] = None
+    work_type: Optional[str] = None
+    repo_name: Optional[str] = None
+
     @field_validator('expected_end')
     def validate_expected_dates(cls, expected_end, info):
         expected_start = info.data.get('expected_start')
@@ -281,3 +473,18 @@ class TimelineUpdate(ConfiguredBaseModel):
         if actual_start and actual_end and actual_end < actual_start:
             raise ValueError("actual_end cannot be earlier than actual_start")
         return actual_end
+
+
+class ClientReceivableCreate(ConfiguredBaseModel):
+    project_id: str
+    item_name: str
+    amount: float = Field(0.0, ge=0.0)
+    frequency: str = "Custom Date"  # "Monthly" or "Custom Date"
+    due_date: str                   # "YYYY-MM-DD"
+
+class ClientReceivableUpdate(ConfiguredBaseModel):
+    item_name: Optional[str] = None
+    amount: Optional[float] = Field(None, ge=0.0)
+    frequency: Optional[str] = None
+    due_date: Optional[str] = None
+    is_done: Optional[bool] = None

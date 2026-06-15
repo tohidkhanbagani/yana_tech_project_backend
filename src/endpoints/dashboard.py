@@ -127,6 +127,9 @@ def get_financial_suite(current_user: dict = Depends(get_current_user)):
                 if p_budget and float(p_budget) > 0:
                     if total_cost >= (float(p_budget) * 0.8):
                         budget_warnings.append({"project": p_name, "budget": p_budget, "cost": total_cost})
+                else:
+                    if total_cost > 0:
+                        budget_warnings.append({"project": p_name, "budget": 0.0, "cost": total_cost})
             
             project_performance_list.sort(key=lambda x: x["profit"], reverse=True)
 
@@ -191,7 +194,14 @@ def get_project_health(current_user: dict = Depends(get_current_user)):
                 current_milestone = active_milestones.get(proj.id)
                 
                 health_tag = "🟢 On Track"
-                if proj.budget and total_cost >= (float(proj.budget) * 0.9): health_tag = "🟡 Nearing Budget Limit"
+                if proj.budget and float(proj.budget) > 0:
+                    if total_cost >= float(proj.budget):
+                        health_tag = "🔴 Budget Overrun"
+                    elif total_cost >= (float(proj.budget) * 0.9):
+                        health_tag = "🟡 Nearing Budget Limit"
+                else:
+                    if total_cost > 0:
+                        health_tag = "🔴 Budget Overrun"
                 if current_milestone and current_milestone.expected_end and current_milestone.expected_end < now:
                     health_tag = "🔴 Timeline Delayed"
 
@@ -617,8 +627,16 @@ def get_analytics_suite(current_user: dict = Depends(get_current_user)):
                 m_total, m_done = milestone_counts.get(p.id, (0, 0))
                 completion_rate = (m_done / m_total) if m_total > 0 else 0
                 
-                budget_ratio = (total_cost / p.budget) if (p.budget and p.budget > 0) else 0
-                budget_score = max(0, 1 - budget_ratio)
+                if p.budget and float(p.budget) > 0:
+                    budget_ratio = total_cost / float(p.budget)
+                    budget_score = max(0.0, 1.0 - budget_ratio)
+                else:
+                    if total_cost > 0:
+                        budget_ratio = 9.99
+                        budget_score = 0.0
+                    else:
+                        budget_ratio = 0.0
+                        budget_score = 1.0
                 
                 # Simple Health Formula
                 health_score = int((0.5 * completion_rate + 0.5 * budget_score) * 100)
@@ -1295,3 +1313,112 @@ def get_manager_summary(current_user: dict = Depends(get_current_user)):
     except Exception as e:
         logger.error(f"Manager Summary Error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to load manager summary data.")
+
+@router.get("/metadata-analytics", tags=["Executive Dashboard"])
+def get_metadata_analytics(current_user: dict = Depends(get_current_user)):
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Hawk-Eye view restricted to Administrators.")
+
+    try:
+        with SessionLocal() as session:
+            # 1. Aggregate DeveloperTasks by Sprint, Module, Feature
+            dev_sprints = session.query(
+                DeveloperTasks.sprint,
+                func.sum(DeveloperTasks.hours_logged).label('hours'),
+                func.count(DeveloperTasks.id).label('count'),
+                func.sum(DeveloperTasks.employee_cost).label('cost'),
+                func.sum(DeveloperTasks.billing_amount).label('billing')
+            ).group_by(DeveloperTasks.sprint).all()
+
+            dev_modules = session.query(
+                DeveloperTasks.module,
+                func.sum(DeveloperTasks.hours_logged).label('hours'),
+                func.count(DeveloperTasks.id).label('count'),
+                func.sum(DeveloperTasks.employee_cost).label('cost'),
+                func.sum(DeveloperTasks.billing_amount).label('billing')
+            ).group_by(DeveloperTasks.module).all()
+
+            dev_features = session.query(
+                DeveloperTasks.feature,
+                func.sum(DeveloperTasks.hours_logged).label('hours'),
+                func.count(DeveloperTasks.id).label('count'),
+                func.sum(DeveloperTasks.employee_cost).label('cost'),
+                func.sum(DeveloperTasks.billing_amount).label('billing')
+            ).group_by(DeveloperTasks.feature).all()
+
+            # 2. Aggregate ContentCreatorTasks by Sprint, Module, Feature
+            con_sprints = session.query(
+                ContentCreatorTasks.sprint,
+                func.sum(ContentCreatorTasks.hours_logged).label('hours'),
+                func.count(ContentCreatorTasks.id).label('count'),
+                func.sum(ContentCreatorTasks.employee_cost).label('cost'),
+                func.sum(ContentCreatorTasks.billing_amount).label('billing')
+            ).group_by(ContentCreatorTasks.sprint).all()
+
+            con_modules = session.query(
+                ContentCreatorTasks.module,
+                func.sum(ContentCreatorTasks.hours_logged).label('hours'),
+                func.count(ContentCreatorTasks.id).label('count'),
+                func.sum(ContentCreatorTasks.employee_cost).label('cost'),
+                func.sum(ContentCreatorTasks.billing_amount).label('billing')
+            ).group_by(ContentCreatorTasks.module).all()
+
+            con_features = session.query(
+                ContentCreatorTasks.feature,
+                func.sum(ContentCreatorTasks.hours_logged).label('hours'),
+                func.count(ContentCreatorTasks.id).label('count'),
+                func.sum(ContentCreatorTasks.employee_cost).label('cost'),
+                func.sum(ContentCreatorTasks.billing_amount).label('billing')
+            ).group_by(ContentCreatorTasks.feature).all()
+
+            # Helper to merge lists of tuples (name, hours, count, cost, billing)
+            def merge_metrics(dev_list, con_list):
+                merged = {}
+                for name, hours, count, cost, billing in dev_list:
+                    n = (name or "N/A").strip()
+                    if not n:
+                        n = "N/A"
+                    if n not in merged:
+                        merged[n] = {"hours": 0.0, "tasks": 0, "cost": 0.0, "billing": 0.0}
+                    merged[n]["hours"] += float(hours or 0)
+                    merged[n]["tasks"] += int(count or 0)
+                    merged[n]["cost"] += float(cost or 0)
+                    merged[n]["billing"] += float(billing or 0)
+
+                for name, hours, count, cost, billing in con_list:
+                    n = (name or "N/A").strip()
+                    if not n:
+                        n = "N/A"
+                    if n not in merged:
+                        merged[n] = {"hours": 0.0, "tasks": 0, "cost": 0.0, "billing": 0.0}
+                    merged[n]["hours"] += float(hours or 0)
+                    merged[n]["tasks"] += int(count or 0)
+                    merged[n]["cost"] += float(cost or 0)
+                    merged[n]["billing"] += float(billing or 0)
+
+                result = []
+                for n, metrics in merged.items():
+                    prof = metrics["billing"] - metrics["cost"]
+                    result.append({
+                        "name": n,
+                        "hours": round(metrics["hours"], 2),
+                        "tasks": metrics["tasks"],
+                        "cost": round(metrics["cost"], 2),
+                        "billing": round(metrics["billing"], 2),
+                        "profit_loss": round(prof, 2)
+                    })
+                result.sort(key=lambda x: x["hours"], reverse=True)
+                return result
+
+            sprint_analytics = merge_metrics(dev_sprints, con_sprints)
+            module_analytics = merge_metrics(dev_modules, con_modules)
+            feature_analytics = merge_metrics(dev_features, con_features)
+
+            return {
+                "sprints": sprint_analytics,
+                "modules": module_analytics,
+                "features": feature_analytics
+            }
+    except Exception as e:
+        logger.error(f"Metadata Analytics Error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to load metadata analytics.")

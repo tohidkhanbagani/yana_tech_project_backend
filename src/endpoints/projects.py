@@ -3,8 +3,9 @@ import logging
 from schemas import (
     ProjectCreate, ProjectUpdate,
     TimelineCreate, TimelineUpdate,
-    SRSCreate, SRSUpdate, ProjectAssignmentCreate, ManagerCreate, ProjectExpenseCreate,
-    MilestoneAssignmentCreate, ProjectPaymentCreate, ProjectPaymentUpdate
+    SRSCreate, SRSUpdate, ProjectAssignmentCreate, ProjectAssignmentUpdate, ProjectExpenseCreate, ProjectExpenseUpdate,
+    MilestoneAssignmentCreate, ProjectPaymentCreate, ProjectPaymentUpdate,
+    ClientReceivableCreate, ClientReceivableUpdate
 )
 from src.database.database_operations import DatabaseOperations
 from src.endpoints.auth import get_current_user, handle_response
@@ -12,33 +13,6 @@ from src.endpoints.auth import get_current_user, handle_response
 logger = logging.getLogger("Yana_Projects_Router")
 router = APIRouter(prefix="/projects", tags=["Project Management"])
 db = DatabaseOperations()
-
-# ==========================================
-#              MANAGERS
-# ==========================================
-
-@router.post("/managers/create", tags=["Project Management"])
-def create_manager(manager: ManagerCreate, current_user: dict = Depends(get_current_user)):
-    if current_user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Only administrators can add managers.")
-    try:
-        data = manager.model_dump(exclude_unset=True)
-        response = db.add_manager(data)
-        return handle_response(response)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Router Error in create_manager: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to add new manager.")
-
-@router.get("/managers/all", tags=["Project Management"])
-def get_all_managers(current_user: dict = Depends(get_current_user)):
-    try:
-        response = db.get_all_managers()
-        return handle_response(response)
-    except Exception as e:
-        logger.error(f"Router Error in get_all_managers: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to fetch managers.")
 
 # ==========================================
 #              CORE PROJECTS
@@ -129,6 +103,19 @@ def get_project_timeline(project_id: str, current_user: dict = Depends(get_curre
     except Exception as e:
         logger.error(f"Router Error in get_project_timeline: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to fetch timeline milestones.")
+
+@router.get("/timeline/employee/{employee_id}", tags=["Project Management"])
+def get_employee_milestones(employee_id: str, current_user: dict = Depends(get_current_user)):
+    try:
+        if current_user.get("role") == "employee" and current_user.get("id") != employee_id:
+            raise HTTPException(status_code=403, detail="Unauthorized access to milestones.")
+        response = db.get_employee_assigned_milestones(employee_id)
+        return handle_response(response)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Router Error in get_employee_milestones: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to fetch employee milestones.")
 
 @router.post("/timeline/create", tags=["Project Management"])
 def create_project_timeline(timeline: TimelineCreate, current_user: dict = Depends(get_current_user)):
@@ -275,6 +262,15 @@ def assign_employee_to_project(assignment: ProjectAssignmentCreate, current_user
         logger.error(f"Router Error in assign_employee_to_project: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to assign employee to project.")
 
+@router.get("/assignments/all", tags=["Project Management"])
+def get_all_project_assignments(current_user: dict = Depends(get_current_user)):
+    try:
+        response = db.get_all_project_assignments()
+        return handle_response(response)
+    except Exception as e:
+        logger.error(f"Router Error in get_all_project_assignments: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to fetch all project assignments mapping.")
+
 @router.get("/assignments/{project_id}", tags=["Project Management"])
 def get_project_assignments(project_id: str, current_user: dict = Depends(get_current_user)):
     try:
@@ -309,6 +305,20 @@ def unassign_employee(assignment_id: str, current_user: dict = Depends(get_curre
     except Exception as e:
         logger.error(f"Router Error in unassign_employee: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to remove assignment.")
+
+@router.put("/assignments/update/{assignment_id}", tags=["Project Management"])
+def update_project_assignment(assignment_id: str, assignment: ProjectAssignmentUpdate, current_user: dict = Depends(get_current_user)):
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Only administrators can modify assignments.")
+    try:
+        data = assignment.model_dump(exclude_unset=True)
+        response = db.edit_project_assignment(assignment_id, data)
+        return handle_response(response)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Router Error in update_project_assignment: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to update project assignment.")
 
 # ==========================================
 #             PROJECT EXPENSES
@@ -347,6 +357,20 @@ def delete_project_expense(expense_id: str, current_user: dict = Depends(get_cur
     except Exception as e:
         logger.error(f"Router Error in delete_project_expense: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to delete expense.")
+
+@router.put("/expenses/update/{expense_id}", tags=["Project Management"])
+def update_project_expense(expense_id: str, expense: ProjectExpenseUpdate, current_user: dict = Depends(get_current_user)):
+    if current_user.get("role") != "admin" or current_user.get("access_level") != "SystemAdmin":
+        raise HTTPException(status_code=403, detail="Only System Administrators have authorization to edit project expenses.")
+    try:
+        data = expense.model_dump(exclude_unset=True)
+        response = db.edit_project_expense(expense_id, data)
+        return handle_response(response)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Router Error in update_project_expense: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to update project expense.")
 
 # ==========================================
 #          PROJECT PAYMENTS
@@ -441,3 +465,51 @@ def export_project_xlsx(project_id: str, current_user: dict = Depends(get_curren
     except Exception as e:
         logger.error(f"Router Error in export_project_xlsx: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to export project data Excel.")
+
+
+# ==========================================
+#          CLIENT RECEIVABLES / REMINDERS
+# ==========================================
+
+@router.post("/receivables/create", tags=["Project Management"])
+def create_client_receivable(receivable: ClientReceivableCreate, current_user: dict = Depends(get_current_user)):
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Only administrators can manage client receivables.")
+    try:
+        data = receivable.model_dump(exclude_unset=True)
+        response = db.add_client_receivable(data)
+        return handle_response(response)
+    except Exception as e:
+        logger.error(f"Router Error in create_client_receivable: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to add client receivable.")
+
+@router.get("/receivables/{project_id}", tags=["Project Management"])
+def get_client_receivables(project_id: str, current_user: dict = Depends(get_current_user)):
+    try:
+        response = db.get_client_receivables(project_id)
+        return handle_response(response)
+    except Exception as e:
+        logger.error(f"Router Error in get_client_receivables: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to fetch client receivables.")
+
+@router.delete("/receivables/delete/{receivable_id}", tags=["Project Management"])
+def delete_client_receivable(receivable_id: str, current_user: dict = Depends(get_current_user)):
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Only administrators can manage client receivables.")
+    try:
+        response = db.delete_client_receivable(receivable_id)
+        return handle_response(response)
+    except Exception as e:
+        logger.error(f"Router Error in delete_client_receivable: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to delete client receivable.")
+
+@router.put("/receivables/mark-done/{receivable_id}", tags=["Project Management"])
+def mark_client_receivable_done(receivable_id: str, current_user: dict = Depends(get_current_user)):
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Only administrators can manage client receivables.")
+    try:
+        response = db.mark_client_receivable_done(receivable_id)
+        return handle_response(response)
+    except Exception as e:
+        logger.error(f"Router Error in mark_client_receivable_done: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to mark receivable as done.")

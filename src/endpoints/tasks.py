@@ -43,35 +43,6 @@ def create_developer_task_batch(tasks: List[DeveloperTaskCreate], current_user: 
         logger.error(f"Router Error in create_developer_task_batch: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to submit batch developer timesheets.")
 
-@router.post("/developer/create", tags=["Timesheets & Tasks"])
-def create_developer_task(task: DeveloperTaskCreate, current_user: dict = Depends(get_current_user)):
-    try:
-        data = task.model_dump(exclude_unset=True)
-        # Security: Force the employee_id to be the currently logged in user unless an Admin is overriding
-        if current_user.get("role") != "admin":
-            data["employee_id"] = current_user.get("id")
-            
-        response = db.add_developer_task(data)
-        return handle_response(response)
-    except Exception as e:
-        logger.error(f"Router Error in create_developer_task: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to submit developer timesheet.")
-
-@router.put("/developer/update/{task_id}", tags=["Timesheets & Tasks"])
-def update_developer_task(task_id: str, task: DeveloperTaskUpdate, current_user: dict = Depends(get_current_user)):
-    try:
-        data = task.model_dump(exclude_unset=True)
-        if not data:
-            raise HTTPException(status_code=400, detail="No data provided to update.")
-        
-        response = db.edit_developer_task(task_id, data)
-        return handle_response(response)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Router Error in update_developer_task: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to update developer timesheet.")
-
 
 # ==========================================
 #        CONTENT CREATOR TASKS
@@ -99,35 +70,6 @@ def create_content_task_batch(tasks: List[ContentTaskCreate], current_user: dict
     except Exception as e:
         logger.error(f"Router Error in create_content_task_batch: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to submit batch content timesheets.")
-
-@router.post("/content/create", tags=["Timesheets & Tasks"])
-def create_content_task(task: ContentTaskCreate, current_user: dict = Depends(get_current_user)):
-    try:
-        data = task.model_dump(exclude_unset=True)
-        # Security: Force the employee_id to be the currently logged in user unless an Admin is overriding
-        if current_user.get("role") != "admin":
-            data["employee_id"] = current_user.get("id")
-            
-        response = db.add_content_creator_task(data)
-        return handle_response(response)
-    except Exception as e:
-        logger.error(f"Router Error in create_content_task: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to submit content creator timesheet.")
-
-@router.put("/content/update/{task_id}", tags=["Timesheets & Tasks"])
-def update_content_task(task_id: str, task: ContentTaskUpdate, current_user: dict = Depends(get_current_user)):
-    try:
-        data = task.model_dump(exclude_unset=True)
-        if not data:
-            raise HTTPException(status_code=400, detail="No data provided to update.")
-        
-        response = db.edit_content_creator_task(task_id, data)
-        return handle_response(response)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Router Error in update_content_task: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to update content timesheet.")
 
 
 # ==========================================
@@ -180,12 +122,3 @@ def get_tasks_by_employee(employee_id: str, current_user: dict = Depends(get_cur
     except Exception as e:
         logger.error(f"Router Error in get_tasks_by_employee: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to retrieve employee task history.")
-
-@router.delete("/delete/{task_id}", tags=["Timesheets & Tasks"])
-def delete_task(task_id: str, current_user: dict = Depends(get_current_user)):
-    try:
-        response = db.delete_task(task_id)
-        return handle_response(response)
-    except Exception as e:
-        logger.error(f"Router Error in delete_task: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to delete task.")

@@ -34,7 +34,13 @@ if DATABASE_URL:
             DATA_DIRECTORY.mkdir(parents=True, exist_ok=True)
         DATABASE_PATH = DATA_DIRECTORY / "yana.db"
         DATABASE_URL = f"sqlite:///{str(DATABASE_PATH)}"
-        engine = create_engine(DATABASE_URL, future=True, echo=False, connect_args={"check_same_thread": False})
+        engine = create_engine(DATABASE_URL, 
+        future=True, 
+        echo=False, 
+        connect_args={"check_same_thread": False},
+        # pool_recycle=600,     # Discard connections older than 10 mins (Supabase defaults drop idle links)
+        # pool_pre_ping=True    # Test connection before giving it to the app
+        )
     else:
         # Fix for SQLAlchemy/PostgreSQL string compatibility if it starts with postgres://
         if DATABASE_URL.startswith("postgres://"):
@@ -44,7 +50,16 @@ if DATABASE_URL:
         DATABASE_URL = DATABASE_URL.replace("?pgbouncer=true", "").replace("&pgbouncer=true", "")
             
         # Create engine for cloud Postgres database (no check_same_thread)
-        engine = create_engine(DATABASE_URL, future=True, echo=False)
+        engine = create_engine(
+            DATABASE_URL,
+            future=True,
+            echo=False,
+            pool_size=5,
+            max_overflow=0,
+            pool_timeout=15,
+            pool_recycle=600,
+            pool_pre_ping=True
+        )
 else:
     # Local SQLite Fallback
     DATA_DIRECTORY = BASE_DIR / "data" / "database"

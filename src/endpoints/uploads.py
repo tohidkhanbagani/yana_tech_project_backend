@@ -46,14 +46,67 @@ async def upload_image(
     # 1. Determine Target Employee
     target_id = current_user['id']
     if employee_id and employee_id != current_user['id']:
-        if current_user.get("access_level") != "SystemAdmin":
-            raise HTTPException(status_code=403, detail="Only System Administrators can upload for other employees.")
+        if current_user.get("access_level") != "SystemAdmin" and current_user.get("role") != "admin":
+            raise HTTPException(status_code=403, detail="Only Administrators can upload for other employees.")
         target_id = employee_id
+
+    # Compliance Lock Check
+    if current_user.get("role") == "employee" and image_type in ["adhar", "pancard", "qr_code"]:
+        from src.database.database_tables import Employees
+        with SessionLocal() as session:
+            emp = session.query(Employees).filter(Employees.id == target_id).first()
+            if emp and emp.compliance_verified:
+                raise HTTPException(status_code=403, detail="Access Denied: Compliance uploads are verified and locked by HR/Admin.")
 
     # 2. Validation
     valid_types = storage_config["images"] + storage_config["documents"]
     if image_type not in valid_types:
         raise HTTPException(status_code=400, detail=f"Invalid type. Must be one of: {', '.join(valid_types)}")
+
+    # 2.1 File extension and MIME type validation
+    filename_ext = os.path.splitext(file.filename)[1].lower()
+    allowed_exts = [".jpg", ".jpeg", ".png", ".pdf"]
+    allowed_mimes = ["image/jpeg", "image/jpg", "image/png", "application/pdf"]
+    if filename_ext not in allowed_exts or file.content_type not in allowed_mimes:
+        raise HTTPException(status_code=400, detail="Invalid file type. Allowed formats: JPG, JPEG, PNG, PDF.")
+
+    # 2.2 File Size Check (Max 5MB)
+    file.file.seek(0, 2)
+    file_size = file.file.tell()
+    await file.seek(0)
+    if file_size > 5 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="File size exceeds the 5MB limit.")
+
+    # 2.3 Image Corruption and Resolution Check
+    if filename_ext in [".jpg", ".jpeg", ".png"]:
+        try:
+            from PIL import Image
+            from io import BytesIO
+            file_bytes = await file.read()
+            img = Image.open(BytesIO(file_bytes))
+            img.verify()
+            
+            # Reopen to check dimensions
+            img = Image.open(BytesIO(file_bytes))
+            width, height = img.size
+            if width < 150 or height < 150:
+                raise HTTPException(status_code=400, detail="Image resolution must be at least 150x150 pixels.")
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid or corrupted image file.")
+        finally:
+            await file.seek(0)
+    elif filename_ext == ".pdf":
+        try:
+            from io import BytesIO
+            file_bytes = await file.read()
+            reader = PyPDF2.PdfReader(BytesIO(file_bytes))
+            _ = len(reader.pages)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid or corrupted PDF file.")
+        finally:
+            await file.seek(0)
 
     # 3. Setup Directory Structure
     # Pattern: data/uploads/[images|documents]/[type]/[sub_type if exists]/[employee_id].[ext]
@@ -65,9 +118,7 @@ async def upload_image(
     
     os.makedirs(base_directory, exist_ok=True)
     
-    ext = mimetypes.guess_extension(file.content_type)
-    ext = ext[1:] if ext else "dat"
-    if image_type == "resume" and not ext: ext = "pdf"
+    ext = filename_ext[1:] if filename_ext else "dat"
     
     # Filename is unique to the employee in that specific type folder
     safe_name = f"{target_id}.{ext}"
@@ -120,9 +171,17 @@ async def delete_image(
     # 1. Determine Target Employee
     target_id = current_user['id']
     if employee_id and employee_id != current_user['id']:
-        if current_user.get("access_level") != "SystemAdmin":
-            raise HTTPException(status_code=403, detail="Only System Administrators can manage other employee files.")
+        if current_user.get("access_level") != "SystemAdmin" and current_user.get("role") != "admin":
+            raise HTTPException(status_code=403, detail="Only Administrators can manage other employee files.")
         target_id = employee_id
+
+    # Compliance Lock Check
+    if current_user.get("role") == "employee" and image_type in ["adhar", "pancard", "qr_code"]:
+        from src.database.database_tables import Employees
+        with SessionLocal() as session:
+            emp = session.query(Employees).filter(Employees.id == target_id).first()
+            if emp and emp.compliance_verified:
+                raise HTTPException(status_code=403, detail="Access Denied: Compliance uploads are verified and locked by HR/Admin.")
 
     # 2. Configuration & Validation
     storage_config = {
