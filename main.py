@@ -45,7 +45,7 @@ async def lifespan(app: FastAPI):
     # --- STARTUP LOGIC ---
     # Ensure all tables are created (Safe to call, won't drop existing data)
     Base.metadata.create_all(bind=engine)
-    
+
     with SessionLocal() as session:
         try:
             admin_count = session.query(Admins).count()
@@ -129,6 +129,18 @@ async def broadcast_middleware(request: Request, call_next):
                 await manager.broadcast({"action": "REFRESH_WORKSPACE"})
     return response
 
+# @app.middleware("http")
+# async def db_connection_cleanup_middleware(request: Request, call_next):
+#     try:
+#         response = await call_next(request)
+#         return response
+#     finally:
+#         try:
+#             from src.database.database_create import engine, DATABASE_URL
+#             if DATABASE_URL and isinstance(DATABASE_URL, str) and DATABASE_URL.startswith("postgres"):
+#                 engine.dispose(close_all_connections=False)
+#         except Exception as e:
+#             logger.error(f"Error disposing database engine: {str(e)}")
 
 if __name__ == "__main__":
     # pyrefly: ignore [missing-import]

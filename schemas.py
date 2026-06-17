@@ -275,6 +275,9 @@ class DeveloperTaskCreate(ConfiguredBaseModel):
     task_status: Optional[str] = "Completed"
     work_type: Optional[str] = "Development"
     was_deployed: Optional[str] = "No"
+    is_overtime: Optional[bool] = False
+    is_handover: Optional[bool] = False
+    handover_for_employee_id: Optional[str] = None
 
     @field_validator('task_performed')
     def validate_task_performed(cls, v):
@@ -327,6 +330,9 @@ class DeveloperTaskUpdate(ConfiguredBaseModel):
     no_project_reason: Optional[str] = None
     task_status: Optional[str] = None
     work_type: Optional[str] = None
+    is_overtime: Optional[bool] = None
+    is_handover: Optional[bool] = None
+    handover_for_employee_id: Optional[str] = None
 
     @field_validator('task_performed')
     def validate_task_performed(cls, v):
@@ -389,6 +395,9 @@ class ContentTaskCreate(ConfiguredBaseModel):
     task_status: Optional[str] = "Completed"
     work_type: Optional[str] = "Development"
     was_deployed: Optional[str] = "No"
+    is_overtime: Optional[bool] = False
+    is_handover: Optional[bool] = False
+    handover_for_employee_id: Optional[str] = None
 
     @field_validator('task_performed')
     def validate_task_performed(cls, v):
@@ -419,6 +428,9 @@ class ContentTaskUpdate(ConfiguredBaseModel):
     no_project_reason: Optional[str] = None
     task_status: Optional[str] = None
     work_type: Optional[str] = None
+    is_overtime: Optional[bool] = None
+    is_handover: Optional[bool] = None
+    handover_for_employee_id: Optional[str] = None
 
     @field_validator('task_performed')
     def validate_task_performed(cls, v):

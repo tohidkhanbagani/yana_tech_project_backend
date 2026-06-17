@@ -344,6 +344,14 @@ class DeveloperTasks(Base):
     
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+    
+    # Track timesheet modifications
+    is_edited = Column(Boolean, default=False, nullable=True)
+    edited_by = Column(String, nullable=True)
+    is_overtime = Column(Boolean, default=False, nullable=True)
+    is_handover = Column(Boolean, default=False, nullable=True)
+    handover_for_employee_id = Column(String, nullable=True)
+
 
 class ContentCreatorTasks(Base):
     """Timesheets explicitly for Social Media, Video Editing, and Content roles."""
@@ -384,6 +392,14 @@ class ContentCreatorTasks(Base):
     
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+    
+    # Track timesheet modifications
+    is_edited = Column(Boolean, default=False, nullable=True)
+    edited_by = Column(String, nullable=True)
+    is_overtime = Column(Boolean, default=False, nullable=True)
+    is_handover = Column(Boolean, default=False, nullable=True)
+    handover_for_employee_id = Column(String, nullable=True)
+
 
 class Attendance(Base):
     __tablename__ = "attendance"

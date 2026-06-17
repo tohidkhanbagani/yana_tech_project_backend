@@ -439,13 +439,14 @@ class DatabaseOperations:
 
                 attendance = session.query(Attendance).filter(
                     Attendance.employee_id == employee_id,
-                    Attendance.date.between(start_of_day, end_of_day)
-                ).first()
+                    Attendance.date.between(start_of_day, end_of_day),
+                    Attendance.check_in_time.isnot(None)
+                ).order_by(Attendance.check_in_time.desc()).first()
 
                 if not attendance:
                     return json.dumps({"error": "Access Denied: You must check in before logging any tasks."})
                 if attendance.check_out_time is not None:
-                    return json.dumps({"error": "Access Denied: You cannot log tasks after checking out."})
+                    return json.dumps({"error": "Access Denied: You cannot log tasks after checking out of your active shift."})
 
                 # Check 24 hours daily limit for timesheet entries
                 dev_hours_today = session.query(func.sum(DeveloperTasks.hours_logged)).filter(
@@ -604,13 +605,14 @@ class DatabaseOperations:
 
                 attendance = session.query(Attendance).filter(
                     Attendance.employee_id == employee_id,
-                    Attendance.date.between(start_of_day, end_of_day)
-                ).first()
+                    Attendance.date.between(start_of_day, end_of_day),
+                    Attendance.check_in_time.isnot(None)
+                ).order_by(Attendance.check_in_time.desc()).first()
 
                 if not attendance:
                     return json.dumps({"error": "Access Denied: You must check in before logging any tasks."})
                 if attendance.check_out_time is not None:
-                    return json.dumps({"error": "Access Denied: You cannot log tasks after checking out."})
+                    return json.dumps({"error": "Access Denied: You cannot log tasks after checking out of your active shift."})
 
                 # Check 24 hours daily limit for timesheet entries
                 dev_hours_today = session.query(func.sum(DeveloperTasks.hours_logged)).filter(
@@ -2362,28 +2364,36 @@ class DatabaseOperations:
 
                 start_of_day = datetime.combine(now.date(), datetime.min.time())
                 end_of_day = datetime.combine(now.date(), datetime.max.time())
-                # Check if already checked in today
-                existing = session.query(Attendance).filter(
+                # Check if there is an active session (not checked out and not Absent)
+                active_session = session.query(Attendance).filter(
                     Attendance.employee_id == employee_id,
-                    Attendance.date.between(start_of_day, end_of_day)
+                    Attendance.date.between(start_of_day, end_of_day),
+                    Attendance.check_in_time.isnot(None),
+                    Attendance.check_out_time.is_(None)
                 ).first()
                 
-                if existing:
-                    # If the existing record is just an "Absent" record, we can overwrite it!
-                    if existing.status == "Absent":
-                        existing.check_in_time = now
-                        existing.date = now
-                        existing.status = "Present"
-                        existing.ip_address = ip_address
-                        existing.notes = "Checked in (overrode auto-absent)"
-                        session.commit()
-                        session.refresh(existing)
-                        attendence_dict = self.model_to_dict(existing)
-                        employee = session.query(Employees).filter_by(id=employee_id).first()
-                        attendence_dict['employee_name'] = employee.full_name if employee else "Employee"
-                        return json.dumps(attendence_dict, indent=4, default=str)
-                    else:
-                        return json.dumps({"error": "Already checked in for today."})
+                if active_session:
+                    return json.dumps({"error": "Already checked in. Please check out of your current session first."})
+
+                # If there's an Absent record today, we can overwrite it as the first check-in
+                absent_record = session.query(Attendance).filter(
+                    Attendance.employee_id == employee_id,
+                    Attendance.date.between(start_of_day, end_of_day),
+                    Attendance.status == "Absent"
+                ).first()
+                
+                if absent_record:
+                    absent_record.check_in_time = now
+                    absent_record.date = now
+                    absent_record.status = "Present"
+                    absent_record.ip_address = ip_address
+                    absent_record.notes = "Checked in (overrode auto-absent)"
+                    session.commit()
+                    session.refresh(absent_record)
+                    attendence_dict = self.model_to_dict(absent_record)
+                    employee = session.query(Employees).filter_by(id=employee_id).first()
+                    attendence_dict['employee_name'] = employee.full_name if employee else "Employee"
+                    return json.dumps(attendence_dict, indent=4, default=str)
                 
                 new_attendance = Attendance(
                     employee_id=employee_id,
