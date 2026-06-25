@@ -328,6 +328,7 @@ async def upload_srs_document(
     version: str = Form("v1.0"),
     file: UploadFile = File(None),
     cloud_link: str = Form(None),
+    srs_text: str = Form(None),
     current_user: dict = Depends(get_current_user)
 ):
     """
@@ -340,11 +341,12 @@ async def upload_srs_document(
     if current_user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Only Admins can manage SRS documents.")
 
-    if not file and not cloud_link:
-        raise HTTPException(status_code=400, detail="Must provide either a PDF file or a direct Cloud Link.")
+    if not file and not cloud_link and not srs_text:
+        raise HTTPException(status_code=400, detail="Must provide either a PDF file, a direct Cloud Link, or pasted SRS text.")
 
     file_content = None
     file_path_to_save = None
+    parsed_text = ""
 
     # Determine safe names
     safe_proj = sanitize_filename(project_name)
@@ -389,10 +391,16 @@ async def upload_srs_document(
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Failed to fetch cloud document: {str(e)}")
 
+    # --- SCENARIO C: PASTED SRS TEXT ---
+    elif srs_text:
+        file_path_to_save = "[Pasted SRS Text]"
+        parsed_text = srs_text
+
     # --- PARSING ALGORITHM ---
-    parsed_text = "Document linked successfully. (External web viewer - parsing bypassed)."
     if file_content:
         parsed_text = extract_text_from_pdf(file_content)
+    elif cloud_link and not file_content:
+        parsed_text = "Document linked successfully. (External web viewer - parsing bypassed)."
 
     # --- SAVE TO DATABASE ---
     # We map this directly using database operations. 
@@ -403,6 +411,7 @@ async def upload_srs_document(
         "version": version,
         "file_url_or_path": file_path_to_save,
         "parsed_content": parsed_text,
+        "srs_text": srs_text,
         "status": "Approved",
         "approved_by": current_user.get("username")
     }
@@ -411,11 +420,11 @@ async def upload_srs_document(
         saved_record = db.add_srs_document(srs_payload)
         return handle_response(saved_record)
     except HTTPException as e:
-        if file_path_to_save and not file_path_to_save.startswith('http') and os.path.exists(file_path_to_save):
+        if file_path_to_save and not file_path_to_save.startswith('http') and file_path_to_save != "[Pasted SRS Text]" and os.path.exists(file_path_to_save):
             os.remove(file_path_to_save)
         raise e
     except Exception as e:
-        if file_path_to_save and not file_path_to_save.startswith('http') and os.path.exists(file_path_to_save):
+        if file_path_to_save and not file_path_to_save.startswith('http') and file_path_to_save != "[Pasted SRS Text]" and os.path.exists(file_path_to_save):
             os.remove(file_path_to_save)
         raise HTTPException(status_code=500, detail=f"Failed to process SRS: {str(e)}")
 

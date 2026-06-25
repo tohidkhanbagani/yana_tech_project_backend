@@ -445,8 +445,33 @@ class DatabaseOperations:
 
                 if not attendance:
                     return json.dumps({"error": "Access Denied: You must check in before logging any tasks."})
+                
+                # Check if employee has any completed shift today
+                has_completed_shift_today = session.query(Attendance).filter(
+                    Attendance.employee_id == employee_id,
+                    Attendance.date.between(start_of_day, end_of_day),
+                    Attendance.check_out_time.isnot(None)
+                ).first() is not None
+
                 if attendance.check_out_time is not None:
-                    return json.dumps({"error": "Access Denied: You cannot log tasks after checking out of your active shift."})
+                    # Automatically check them in for an extended/overtime shift
+                    extended_attendance = Attendance(
+                        employee_id=employee_id,
+                        check_in_time=datetime.now(),
+                        date=datetime.now(),
+                        status="Checked In",
+                        attendance_status="Extended Shift",
+                        ip_address=attendance.ip_address,
+                        notes="Auto Checked In for Extended Shift"
+                    )
+                    session.add(extended_attendance)
+                    session.flush()
+                    attendance = extended_attendance
+                    has_completed_shift_today = True
+
+                employee = session.query(Employees).filter_by(id=employee_id).first()
+                if not employee:
+                    return json.dumps({"error": f"Employee {employee_id} not found. Cannot calculate costs."})
 
                 # Check 24 hours daily limit for timesheet entries
                 dev_hours_today = session.query(func.sum(DeveloperTasks.hours_logged)).filter(
@@ -465,13 +490,12 @@ class DatabaseOperations:
                 if existing_hours_today + hours_logged > 24.0:
                     return json.dumps({"error": f"Daily limit exceeded: You have already logged {existing_hours_today} hours on this date. Logging {hours_logged} hours would exceed the 24 hours daily limit."})
 
+                normal_limit = float(employee.working_hours or 8.0)
+                if has_completed_shift_today or (existing_hours_today + hours_logged > normal_limit):
+                    data["is_overtime"] = True
+
                 # Store the parsed datetime in data
                 data["date"] = task_date
-
-                # --- PHASE 5: ADVANCED FINANCIAL AUTO-CALCULATION ---
-                employee = session.query(Employees).filter_by(id=employee_id).first()
-                if not employee:
-                    return json.dumps({"error": f"Employee {employee_id} not found. Cannot calculate costs."})
                     
                 project_id = data.get("project_id")
                 cost_rate = float(employee.hourly_cost_rate or 0.0)
@@ -479,12 +503,19 @@ class DatabaseOperations:
 
                 # Intercept logic: If working on a specific project, check for custom whitelist rates
                 if project_id:
+                    # If it's a handover task, check assignment for the original colleague
+                    check_emp_id = employee_id
+                    if data.get("is_handover") and data.get("handover_for_employee_id"):
+                        check_emp_id = data.get("handover_for_employee_id")
+
                     assignment = session.query(ProjectAssignments).filter_by(
                         project_id=project_id, 
-                        employee_id=employee_id
+                        employee_id=check_emp_id
                     ).first()
                     
                     if not assignment:
+                        if data.get("is_handover") and data.get("handover_for_employee_id"):
+                            return json.dumps({"error": "The colleague you are covering for is not assigned to this project. Access denied."})
                         return json.dumps({"error": "You are not assigned to this project. Access denied."})
 
                     if assignment.custom_hourly_billing is not None:
@@ -549,8 +580,23 @@ class DatabaseOperations:
                         if not milestone.actual_start:
                             milestone.actual_start = datetime.now()
                         
+                # Update status of original handover task if handover_source_task_id is provided
+                source_task_id = data.get("handover_source_task_id")
+                if source_task_id:
+                    orig_task = session.query(DeveloperTasks).filter_by(id=source_task_id).first()
+                    if not orig_task:
+                        orig_task = session.query(ContentCreatorTasks).filter_by(id=source_task_id).first()
+                    if orig_task:
+                        orig_task.task_status = data.get("task_status", "Completed")
+                    
+                    # Also update LeaveRequest if matches source_task_id
+                    leave_req = session.query(LeaveRequest).filter_by(id=source_task_id).first()
+                    if leave_req:
+                        leave_req.handover_status = "Completed" if data.get("task_status") == "Completed" else "Pending"
+
                 session.commit()
                 session.refresh(new_task)
+
                 
                 logger.info(f"Developer Task Added | Emp: {employee.username} | Profit: ${data['profit_loss']}")
                 return json.dumps(self.model_to_dict(new_task), indent=4, default=str)
@@ -611,8 +657,33 @@ class DatabaseOperations:
 
                 if not attendance:
                     return json.dumps({"error": "Access Denied: You must check in before logging any tasks."})
+                
+                # Check if employee has any completed shift today
+                has_completed_shift_today = session.query(Attendance).filter(
+                    Attendance.employee_id == employee_id,
+                    Attendance.date.between(start_of_day, end_of_day),
+                    Attendance.check_out_time.isnot(None)
+                ).first() is not None
+
                 if attendance.check_out_time is not None:
-                    return json.dumps({"error": "Access Denied: You cannot log tasks after checking out of your active shift."})
+                    # Automatically check them in for an extended/overtime shift
+                    extended_attendance = Attendance(
+                        employee_id=employee_id,
+                        check_in_time=datetime.now(),
+                        date=datetime.now(),
+                        status="Checked In",
+                        attendance_status="Extended Shift",
+                        ip_address=attendance.ip_address,
+                        notes="Auto Checked In for Extended Shift"
+                    )
+                    session.add(extended_attendance)
+                    session.flush()
+                    attendance = extended_attendance
+                    has_completed_shift_today = True
+
+                employee = session.query(Employees).filter_by(id=employee_id).first()
+                if not employee:
+                    return json.dumps({"error": f"Employee {employee_id} not found."})
 
                 # Check 24 hours daily limit for timesheet entries
                 dev_hours_today = session.query(func.sum(DeveloperTasks.hours_logged)).filter(
@@ -631,13 +702,12 @@ class DatabaseOperations:
                 if existing_hours_today + hours_logged > 24.0:
                     return json.dumps({"error": f"Daily limit exceeded: You have already logged {existing_hours_today} hours on this date. Logging {hours_logged} hours would exceed the 24 hours daily limit."})
 
+                normal_limit = float(employee.working_hours or 8.0)
+                if has_completed_shift_today or (existing_hours_today + hours_logged > normal_limit):
+                    data["is_overtime"] = True
+
                 # Store the parsed datetime in data
                 data["date"] = task_date
-
-                # --- PHASE 5: ADVANCED FINANCIAL AUTO-CALCULATION ---
-                employee = session.query(Employees).filter_by(id=employee_id).first()
-                if not employee:
-                    return json.dumps({"error": f"Employee {employee_id} not found."})
 
                 project_id = data.get("project_id")
                 cost_rate = float(employee.hourly_cost_rate or 0.0)
@@ -645,12 +715,19 @@ class DatabaseOperations:
 
                 # Intercept logic: If working on a specific project, check for custom whitelist rates
                 if project_id:
+                    # If it's a handover task, check assignment for the original colleague
+                    check_emp_id = employee_id
+                    if data.get("is_handover") and data.get("handover_for_employee_id"):
+                        check_emp_id = data.get("handover_for_employee_id")
+
                     assignment = session.query(ProjectAssignments).filter_by(
                         project_id=project_id, 
-                        employee_id=employee_id
+                        employee_id=check_emp_id
                     ).first()
                     
                     if not assignment:
+                        if data.get("is_handover") and data.get("handover_for_employee_id"):
+                            return json.dumps({"error": "The colleague you are covering for is not assigned to this project. Access denied."})
                         return json.dumps({"error": "You are not assigned to this project. Access denied."})
 
                     if assignment.custom_hourly_billing is not None:
@@ -722,8 +799,23 @@ class DatabaseOperations:
                         if not milestone.actual_start:
                             milestone.actual_start = datetime.now()
                         
+                # Update status of original handover task if handover_source_task_id is provided
+                source_task_id = data.get("handover_source_task_id")
+                if source_task_id:
+                    orig_task = session.query(DeveloperTasks).filter_by(id=source_task_id).first()
+                    if not orig_task:
+                        orig_task = session.query(ContentCreatorTasks).filter_by(id=source_task_id).first()
+                    if orig_task:
+                        orig_task.task_status = data.get("task_status", "Completed")
+                    
+                    # Also update LeaveRequest if matches source_task_id
+                    leave_req = session.query(LeaveRequest).filter_by(id=source_task_id).first()
+                    if leave_req:
+                        leave_req.handover_status = "Completed" if data.get("task_status") == "Completed" else "Pending"
+
                 session.commit()
                 session.refresh(new_task)
+
 
                 logger.info(f"Content Task Added | EmpID: {employee_id} | Total Content: {data['total_content']}")
                 return json.dumps(self.model_to_dict(new_task), indent=4, default=str)
@@ -872,6 +964,18 @@ class DatabaseOperations:
                 
                 results = query.all()
                 
+                # Pre-calculate project accumulated costs
+                dev_costs = {row.project_id: float(row.cost or 0) for row in session.query(
+                    DeveloperTasks.project_id, func.sum(DeveloperTasks.employee_cost).label('cost')
+                ).group_by(DeveloperTasks.project_id).all() if row.project_id}
+                
+                content_costs = {row.project_id: float(row.cost or 0) for row in session.query(
+                    ContentCreatorTasks.project_id, func.sum(ContentCreatorTasks.employee_cost).label('cost')
+                ).group_by(ContentCreatorTasks.project_id).all() if row.project_id}
+                
+                srs_project_ids = {row.project_id for row in session.query(SRS_Documents.project_id).all() if row.project_id}
+                
+                now = datetime.now()
                 res_list = []
                 for proj, total_paid, total_milestones, completed_milestones in results:
                     p_dict = self.model_to_dict(proj)
@@ -894,6 +998,44 @@ class DatabaseOperations:
                     p_dict['total_paid'] = total_paid
                     p_dict['pending_amount'] = pending_amount
                     p_dict['payment_status'] = payment_status
+                    
+                    # Cost & Profit calculation
+                    cost = dev_costs.get(proj.id, 0.0) + content_costs.get(proj.id, 0.0)
+                    p_dict['accumulated_cost'] = cost
+                    p_dict['profit'] = client_cost - cost
+                    
+                    # Risk status calculation
+                    is_at_risk = False
+                    risk_reasons = []
+                    
+                    p_status = (proj.status or "").lower()
+                    if "risk" in p_status or "delayed" in p_status or "critical" in p_status:
+                        is_at_risk = True
+                        risk_reasons.append(f"Status is '{proj.status}'")
+                        
+                    p_budget = float(proj.budget) if proj.budget else 0.0
+                    if p_budget > 0.0 and cost >= p_budget:
+                        is_at_risk = True
+                        risk_reasons.append(f"Budget Overrun (${cost:.2f} / ${p_budget:.2f})")
+                    elif p_budget > 0.0 and cost >= (p_budget * 0.9):
+                        is_at_risk = True
+                        risk_reasons.append(f"Nearing Budget Limit ({cost/p_budget*100:.1f}%)")
+                        
+                    if proj.end_date and proj.end_date != "N/A":
+                        try:
+                            p_end = datetime.strptime(proj.end_date.strip(), "%Y-%m-%d")
+                            if p_end < now:
+                                is_at_risk = True
+                                risk_reasons.append("Project Deadline Passed")
+                        except:
+                            pass
+                            
+                    if proj.id not in srs_project_ids:
+                        is_at_risk = True
+                        risk_reasons.append("SRS Document Missing")
+                        
+                    p_dict['is_at_risk'] = is_at_risk
+                    p_dict['risk_reasons'] = risk_reasons
                     
                     res_list.append(p_dict)
                     
@@ -996,7 +1138,7 @@ class DatabaseOperations:
     def get_employee_assigned_milestones(self, employee_id: str) -> str:
         with self.SessionLocal() as session:
             try:
-                results = session.query(ProjectTimeline, Projects.name).join(
+                results = session.query(ProjectTimeline, Projects).join(
                     MilestoneAssignments, ProjectTimeline.id == MilestoneAssignments.milestone_id
                 ).join(
                     Projects, ProjectTimeline.project_id == Projects.id
@@ -1004,10 +1146,57 @@ class DatabaseOperations:
                     MilestoneAssignments.employee_id == employee_id
                 ).order_by(ProjectTimeline.expected_start).all()
                 
+                # Pre-calculate project costs
+                dev_costs = {row.project_id: float(row.cost or 0) for row in session.query(
+                    DeveloperTasks.project_id, func.sum(DeveloperTasks.employee_cost).label('cost')
+                ).group_by(DeveloperTasks.project_id).all()}
+                
+                content_costs = {row.project_id: float(row.cost or 0) for row in session.query(
+                    ContentCreatorTasks.project_id, func.sum(ContentCreatorTasks.employee_cost).label('cost')
+                ).group_by(ContentCreatorTasks.project_id).all()}
+                
+                now = datetime.now()
                 res_list = []
-                for milestone, project_name in results:
+                for milestone, project in results:
                     m_dict = self.model_to_dict(milestone)
-                    m_dict['projectName'] = project_name
+                    m_dict['projectName'] = project.name
+                    
+                    # Parent project risk
+                    proj_cost = dev_costs.get(project.id, 0.0) + content_costs.get(project.id, 0.0)
+                    proj_budget = float(project.budget) if project.budget else 0.0
+                    proj_at_risk = False
+                    proj_risk_reasons = []
+                    
+                    p_status = (project.status or "").lower()
+                    if "risk" in p_status or "delayed" in p_status or "critical" in p_status:
+                        proj_at_risk = True
+                        proj_risk_reasons.append(f"Status: {project.status}")
+                    if proj_budget > 0.0 and proj_cost >= proj_budget:
+                        proj_at_risk = True
+                        proj_risk_reasons.append("Budget Exceeded")
+                    elif proj_budget > 0.0 and proj_cost >= (proj_budget * 0.9):
+                        proj_at_risk = True
+                        proj_risk_reasons.append("Nearing Budget Limit")
+                    if project.end_date and project.end_date != "N/A":
+                        try:
+                            p_end = datetime.strptime(project.end_date, "%Y-%m-%d")
+                            if p_end < now:
+                                proj_at_risk = True
+                                proj_risk_reasons.append("Deadline Passed")
+                        except:
+                            pass
+                            
+                    # Milestone risk
+                    is_delayed = False
+                    m_status = (milestone.status or "").lower()
+                    if m_status == "delayed" or m_status == "at risk":
+                        is_delayed = True
+                    if milestone.expected_end and milestone.expected_end < now and m_status != "completed":
+                        is_delayed = True
+                        
+                    m_dict['is_delayed'] = is_delayed
+                    m_dict['project_at_risk'] = proj_at_risk
+                    m_dict['project_risk_reasons'] = proj_risk_reasons
                     res_list.append(m_dict)
                 return json.dumps(res_list, indent=4, default=str)
             except Exception as e:
@@ -1163,12 +1352,64 @@ class DatabaseOperations:
                 # Find all project assignments for this employee
                 assignments = session.query(ProjectAssignments, Projects).join(
                     Projects, ProjectAssignments.project_id == Projects.id
-                ).filter(ProjectAssignments.employee_id == employee_id).all()
+                ).filter(
+                    ProjectAssignments.employee_id == employee_id,
+                    func.lower(func.coalesce(Projects.status, '')) != 'completed'
+                ).all()
                 
+                # Pre-calculate project accumulated costs
+                dev_costs = {row.project_id: float(row.cost or 0) for row in session.query(
+                    DeveloperTasks.project_id, func.sum(DeveloperTasks.employee_cost).label('cost')
+                ).group_by(DeveloperTasks.project_id).all()}
+                
+                content_costs = {row.project_id: float(row.cost or 0) for row in session.query(
+                    ContentCreatorTasks.project_id, func.sum(ContentCreatorTasks.employee_cost).label('cost')
+                ).group_by(ContentCreatorTasks.project_id).all()}
+                
+                now = datetime.now()
                 res_list = []
                 for assign, proj in assignments:
                     p_dict = self.model_to_dict(proj)
                     p_dict['progress'] = proj.progress if proj.progress else "0%"
+                    
+                    # Cost calculation
+                    cost = dev_costs.get(proj.id, 0.0) + content_costs.get(proj.id, 0.0)
+                    p_dict['accumulated_cost'] = cost
+                    
+                    # Risk status calculation
+                    is_at_risk = False
+                    risk_reasons = []
+                    
+                    p_status = (proj.status or "").lower()
+                    if "risk" in p_status or "delayed" in p_status or "critical" in p_status:
+                        is_at_risk = True
+                        risk_reasons.append(f"Status is '{proj.status}'")
+                        
+                    p_budget = float(proj.budget) if proj.budget else 0.0
+                    if p_budget > 0.0 and cost >= p_budget:
+                        is_at_risk = True
+                        risk_reasons.append(f"Budget Overrun (${cost:.2f} / ${p_budget:.2f})")
+                    elif p_budget > 0.0 and cost >= (p_budget * 0.9):
+                        is_at_risk = True
+                        risk_reasons.append(f"Nearing Budget Limit ({cost/p_budget*100:.1f}%)")
+                        
+                    if proj.end_date and proj.end_date != "N/A":
+                        try:
+                            p_end = datetime.strptime(proj.end_date, "%Y-%m-%d")
+                            if p_end < now:
+                                is_at_risk = True
+                                risk_reasons.append("Project Deadline Passed")
+                        except:
+                            pass
+                            
+                    # Check missing SRS
+                    srs_exists = session.query(SRS_Documents).filter_by(project_id=proj.id).first()
+                    if not srs_exists:
+                        is_at_risk = True
+                        risk_reasons.append("SRS Document Missing")
+                        
+                    p_dict['is_at_risk'] = is_at_risk
+                    p_dict['risk_reasons'] = risk_reasons
                     res_list.append(p_dict)
                     
                 return json.dumps(res_list, indent=4, default=str)
@@ -2319,8 +2560,21 @@ class DatabaseOperations:
         Scans for any open attendance records (check_in_time present, check_out_time missing)
         for this employee that are older than 16 hours, and auto-completes them (8 hours duration)
         so that data remains clean and doesn't conflict with today's logins/check-ins.
+        Also scans for overnight sessions spanning into today past the 10-minute shift reset boundary.
         """
         from datetime import timedelta
+        employee = session.query(Employees).filter_by(id=employee_id).first()
+        if not employee:
+            return
+        
+        shift_start_str = employee.shift_start_time or "09:00"
+        try:
+            sh, sm = map(int, shift_start_str.split(":"))
+        except Exception:
+            sh, sm = 9, 0
+            
+        today_shift_reset = datetime.combine(now.date(), datetime.min.time().replace(hour=sh, minute=sm)) - timedelta(minutes=10)
+        
         dangling_records = session.query(Attendance).filter(
             Attendance.employee_id == employee_id,
             Attendance.check_in_time.isnot(None),
@@ -2328,18 +2582,23 @@ class DatabaseOperations:
         ).all()
         
         for r in dangling_records:
-            # If the check-in is older than 16 hours, auto-checkout
             if now - r.check_in_time > timedelta(hours=16):
                 r.check_out_time = r.check_in_time + timedelta(hours=8)
                 r.total_hours = 8.0
                 r.notes = (r.notes + " | " if r.notes else "") + "Auto Checked Out (forgot to check out)"
+                r.status = "Checked Out"
+            elif r.check_in_time < today_shift_reset and now >= today_shift_reset:
+                r.check_out_time = today_shift_reset
+                time_diff = today_shift_reset - r.check_in_time
+                r.total_hours = max(0.0, time_diff.total_seconds() / 3600.0)
+                r.notes = (r.notes + " | " if r.notes else "") + "Auto Checked Out at shift reset (overnight shift)"
                 r.status = "Checked Out"
         session.commit()
 
     def _auto_checkout_all_old_sessions_internal(self, session, now: datetime) -> None:
         """
         Scans for all unclosed attendance records across all employees and auto-checks them out
-        if they are older than 16 hours.
+        if they are older than 16 hours or span past the employee's shift reset boundary.
         """
         from datetime import timedelta
         dangling_records = session.query(Attendance).filter(
@@ -2348,10 +2607,27 @@ class DatabaseOperations:
         ).all()
         
         for r in dangling_records:
+            emp = session.query(Employees).filter_by(id=r.employee_id).first()
+            if not emp:
+                continue
+            shift_start_str = emp.shift_start_time or "09:00"
+            try:
+                sh, sm = map(int, shift_start_str.split(":"))
+            except Exception:
+                sh, sm = 9, 0
+                
+            today_shift_reset = datetime.combine(now.date(), datetime.min.time().replace(hour=sh, minute=sm)) - timedelta(minutes=10)
+            
             if now - r.check_in_time > timedelta(hours=16):
                 r.check_out_time = r.check_in_time + timedelta(hours=8)
                 r.total_hours = 8.0
                 r.notes = (r.notes + " | " if r.notes else "") + "Auto Checked Out (forgot to check out)"
+                r.status = "Checked Out"
+            elif r.check_in_time < today_shift_reset and now >= today_shift_reset:
+                r.check_out_time = today_shift_reset
+                time_diff = today_shift_reset - r.check_in_time
+                r.total_hours = max(0.0, time_diff.total_seconds() / 3600.0)
+                r.notes = (r.notes + " | " if r.notes else "") + "Auto Checked Out at shift reset (overnight shift)"
                 r.status = "Checked Out"
         session.commit()
 
@@ -2362,12 +2638,9 @@ class DatabaseOperations:
                 # Run auto-checkout first for old dangling sessions of this employee
                 self._auto_checkout_old_sessions_internal(session, employee_id, now)
 
-                start_of_day = datetime.combine(now.date(), datetime.min.time())
-                end_of_day = datetime.combine(now.date(), datetime.max.time())
-                # Check if there is an active session (not checked out and not Absent)
+                # Check if there is an active session (not checked out)
                 active_session = session.query(Attendance).filter(
                     Attendance.employee_id == employee_id,
-                    Attendance.date.between(start_of_day, end_of_day),
                     Attendance.check_in_time.isnot(None),
                     Attendance.check_out_time.is_(None)
                 ).first()
@@ -2375,43 +2648,82 @@ class DatabaseOperations:
                 if active_session:
                     return json.dumps({"error": "Already checked in. Please check out of your current session first."})
 
-                # If there's an Absent record today, we can overwrite it as the first check-in
-                absent_record = session.query(Attendance).filter(
+                employee = session.query(Employees).filter_by(id=employee_id).first()
+                if not employee:
+                    return json.dumps({"error": "Employee not found."})
+                employee_name = employee.full_name
+
+                # Evaluate timing rule based status
+                shift_start_str = employee.shift_start_time or "09:00"
+                shift_end_str = employee.shift_end_time or "18:00"
+                try:
+                    sh, sm = map(int, shift_start_str.split(":"))
+                except Exception:
+                    sh, sm = 9, 0
+                try:
+                    eh, em = map(int, shift_end_str.split(":"))
+                except Exception:
+                    eh, em = 18, 0
+
+                from datetime import timedelta
+                today_shift_start = datetime.combine(now.date(), datetime.min.time().replace(hour=sh, minute=sm))
+                today_shift_end = datetime.combine(now.date(), datetime.min.time().replace(hour=eh, minute=em))
+                today_shift_reset = today_shift_start - timedelta(minutes=10)
+
+                if now < today_shift_reset:
+                    target_date = now.date() - timedelta(days=1)
+                    attendance_status = "Extended Shift"
+                else:
+                    target_date = now.date()
+                    if now > today_shift_end:
+                        attendance_status = "Extended Shift"
+                    else:
+                        diff = now - today_shift_start
+                        diff_seconds = diff.total_seconds()
+                        if diff_seconds > 4 * 3600:
+                            attendance_status = "Absent"
+                        elif diff_seconds > 2 * 3600:
+                            attendance_status = "Half-Day"
+                        elif diff_seconds > 15 * 60:
+                            attendance_status = "Late"
+                        else:
+                            attendance_status = "Present"
+
+                # If there's an Absent or On Leave record on the target date, we override it
+                start_of_target_day = datetime.combine(target_date, datetime.min.time())
+                end_of_target_day = datetime.combine(target_date, datetime.max.time())
+                existing_record = session.query(Attendance).filter(
                     Attendance.employee_id == employee_id,
-                    Attendance.date.between(start_of_day, end_of_day),
-                    Attendance.status == "Absent"
+                    Attendance.date.between(start_of_target_day, end_of_target_day)
                 ).first()
                 
-                if absent_record:
-                    absent_record.check_in_time = now
-                    absent_record.date = now
-                    absent_record.status = "Present"
-                    absent_record.ip_address = ip_address
-                    absent_record.notes = "Checked in (overrode auto-absent)"
+                if existing_record and existing_record.status in ["Absent", "On Leave"]:
+                    existing_record.check_in_time = now
+                    existing_record.status = "Checked In"
+                    existing_record.attendance_status = attendance_status
+                    existing_record.ip_address = ip_address
+                    existing_record.notes = (existing_record.notes + " | " if existing_record.notes else "") + f"Checked in (overrode {existing_record.status}) | Attendance: {attendance_status}"
                     session.commit()
-                    session.refresh(absent_record)
-                    attendence_dict = self.model_to_dict(absent_record)
-                    employee = session.query(Employees).filter_by(id=employee_id).first()
-                    attendence_dict['employee_name'] = employee.full_name if employee else "Employee"
+                    session.refresh(existing_record)
+                    attendence_dict = self.model_to_dict(existing_record)
+                    attendence_dict['employee_name'] = employee_name
                     return json.dumps(attendence_dict, indent=4, default=str)
                 
                 new_attendance = Attendance(
                     employee_id=employee_id,
                     check_in_time=now,
-                    date=now,
-                    status="Present",
-                    ip_address=ip_address
+                    date=datetime.combine(target_date, now.time()),
+                    status="Checked In",
+                    attendance_status=attendance_status,
+                    ip_address=ip_address,
+                    notes=f"Checked in | Attendance: {attendance_status}"
                 )
 
-                employee = session.query(Employees).filter_by(id=employee_id).first()
-                if not employee:
-                    return json.dumps({"error": "Employee not found."})
-                employee_name = employee.full_name
                 session.add(new_attendance)
                 session.commit()
                 session.refresh(new_attendance)
                 attendence_dict = self.model_to_dict(new_attendance)
-                attendence_dict['employee_name']=employee_name
+                attendence_dict['employee_name'] = employee_name
                 return json.dumps(attendence_dict, indent=4, default=str)
             except Exception as e:
                 session.rollback()
@@ -2448,11 +2760,14 @@ class DatabaseOperations:
                 return self._handle_error("check_out", e)
 
     def record_daily_absences_internal(self, session) -> None:
-        """Helper to dynamically populate 'Absent' records for active employees who haven't checked in today."""
+        """Helper to dynamically populate 'Absent' or 'On Leave' records for active employees who haven't checked in today."""
         now = datetime.now()
         start_of_day = datetime.combine(now.date(), datetime.min.time())
         end_of_day = datetime.combine(now.date(), datetime.max.time())
         
+        from src.database.database_tables import LeaveRequest
+        today_str = now.strftime("%Y-%m-%d")
+
         active_employees = session.query(Employees).filter(Employees.is_active == True).all()
         for emp in active_employees:
             # Check if there is any attendance record for this employee today
@@ -2462,12 +2777,27 @@ class DatabaseOperations:
             ).first()
             
             if not existing:
+                # Check if there is an approved leave request for today
+                approved_leave = session.query(LeaveRequest).filter(
+                    LeaveRequest.employee_id == emp.id,
+                    LeaveRequest.status == "Approved",
+                    LeaveRequest.start_date <= today_str,
+                    LeaveRequest.end_date >= today_str
+                ).first()
+
+                status = "Absent"
+                notes = "Auto-recorded absent (no check-in detected)"
+                if approved_leave:
+                    status = "On Leave"
+                    notes = f"On Leave (Approved request: {approved_leave.reason})"
+
                 absent_record = Attendance(
                     employee_id=emp.id,
                     date=now,
-                    status="Absent",
+                    status=status,
+                    attendance_status=status,
                     total_hours=0.0,
-                    notes="Auto-recorded absent (no check-in detected)"
+                    notes=notes
                 )
                 session.add(absent_record)
         session.commit()
@@ -2605,7 +2935,8 @@ class DatabaseOperations:
     def create_leave_request(self, employee_id: str, start_date: str, end_date: str, reason: str,
                              leave_type: str = "Paid Leave", half_day_option: str = "Full Day",
                              total_days: float = 1.0, pending_work_summary: str = "N/A",
-                             backup_employee_id: str = "N/A", deployment_pending: str = "No") -> str:
+                             backup_employee_id: str = "N/A", deployment_pending: str = "No",
+                             project_id: str = None, milestone_id: str = None, task_type: str = None) -> str:
         with self.SessionLocal() as session:
             try:
                 # 11. Add Mandatory Validation Rules:
@@ -2656,6 +2987,10 @@ class DatabaseOperations:
                     pending_work_summary=pending_work_summary,
                     backup_employee_id=backup_employee_id,
                     deployment_pending=deployment_pending,
+                    project_id=project_id,
+                    milestone_id=milestone_id,
+                    task_type=task_type,
+                    handover_status="Pending",
                     status="Pending"
                 )
                 session.add(new_request)
@@ -2683,14 +3018,15 @@ class DatabaseOperations:
                     )
                     session.add(new_notif)
 
-                if backup_employee_id and backup_employee_id != "N/A":
-                    backup_notif = InAppNotification(
-                        user_id=backup_employee_id,
-                        title="Task Handover Assigned",
-                        message=f"{emp_name} has designated you as backup for their leave from {start_dt.strftime('%Y-%m-%d')} to {end_dt.strftime('%Y-%m-%d')}. Work Summary: {pending_work_summary}",
-                        is_read=False
-                    )
-                    session.add(backup_notif)
+                # Commented out to prevent notifying the backup employee before admin approval
+                # if backup_employee_id and backup_employee_id != "N/A":
+                #     backup_notif = InAppNotification(
+                #         user_id=backup_employee_id,
+                #         title="Task Handover Assigned",
+                #         message=f"{emp_name} has designated you as backup for their leave from {start_dt.strftime('%Y-%m-%d')} to {end_dt.strftime('%Y-%m-%d')}. Work Summary: {pending_work_summary}",
+                #         is_read=False
+                #     )
+                #     session.add(backup_notif)
 
                 session.commit()
 
@@ -2710,7 +3046,7 @@ class DatabaseOperations:
     def get_backup_coverages_by_employee(self, employee_id: str) -> str:
         with self.SessionLocal() as session:
             try:
-                records = session.query(LeaveRequest).filter_by(backup_employee_id=employee_id).all()
+                records = session.query(LeaveRequest).filter_by(backup_employee_id=employee_id, status='Approved').all()
                 res_list = []
                 for r in records:
                     r_dict = self.model_to_dict(r)
@@ -2777,11 +3113,11 @@ class DatabaseOperations:
                 if not record:
                     return json.dumps({"error": "Leave request not found."})
                 
-                # Check if leave has already started or today is the start date
+                # Allow cancellation requests as long as the leave has not fully ended yet
                 today = datetime.now().date()
-                leave_start = record.start_date.date()
-                if today >= leave_start:
-                    return json.dumps({"error": "Cannot cancel or request cancellation of a leave request on or after the day the leave starts."})
+                leave_end = record.end_date.date()
+                if today > leave_end:
+                    return json.dumps({"error": "Cannot cancel or request cancellation of a leave request after the leave has ended."})
                 
                 if record.status == "Pending":
                     # Direct cancel
@@ -2830,6 +3166,8 @@ class DatabaseOperations:
         with self.SessionLocal() as session:
             try:
                 from datetime import datetime, timedelta
+                from src.database.database_tables import Employees, ProjectAssignments, Projects, DeveloperTasks, ContentCreatorTasks, ProjectTimeline, InAppNotification, SRS_Documents
+                
                 thirty_days_ago = datetime.now() - timedelta(days=30)
                 seven_days_ago = datetime.now() - timedelta(days=7)
                 
@@ -2843,6 +3181,135 @@ class DatabaseOperations:
                     InAppNotification.is_read == True,
                     InAppNotification.created_at < seven_days_ago
                 ).delete(synchronize_session=False)
+                
+                # --- AUTO-SYNC RISK NOTIFICATIONS FOR EMPLOYEES ---
+                # Check if this user is an employee
+                employee = session.query(Employees).filter_by(id=user_id, is_active=True).first()
+                if employee:
+                    # A. Check Projects at Risk
+                    # Get assigned projects (via ProjectAssignments)
+                    assigned_projects = session.query(Projects).join(
+                        ProjectAssignments, Projects.id == ProjectAssignments.project_id
+                    ).filter(
+                        ProjectAssignments.employee_id == user_id,
+                        func.lower(func.coalesce(Projects.status, '')) != 'completed'
+                    ).all()
+                    
+                    # Pre-calculate project accumulated costs
+                    dev_costs = {row.project_id: float(row.cost or 0) for row in session.query(
+                        DeveloperTasks.project_id, func.sum(DeveloperTasks.employee_cost).label('cost')
+                    ).group_by(DeveloperTasks.project_id).all()}
+                    
+                    content_costs = {row.project_id: float(row.cost or 0) for row in session.query(
+                        ContentCreatorTasks.project_id, func.sum(ContentCreatorTasks.employee_cost).label('cost')
+                    ).group_by(ContentCreatorTasks.project_id).all()}
+                    
+                    now = datetime.now()
+                    
+                    for proj in assigned_projects:
+                        is_at_risk = False
+                        risk_reasons = []
+                        
+                        # Check status
+                        p_status = (proj.status or "").lower()
+                        if "risk" in p_status or "delayed" in p_status or "critical" in p_status:
+                            is_at_risk = True
+                            risk_reasons.append(f"Status is '{proj.status}'")
+                            
+                        # Check budget overrun
+                        p_budget = float(proj.budget) if proj.budget else 0.0
+                        total_cost = dev_costs.get(proj.id, 0.0) + content_costs.get(proj.id, 0.0)
+                        if p_budget > 0.0 and total_cost >= p_budget:
+                            is_at_risk = True
+                            risk_reasons.append(f"Budget overrun (${total_cost:.2f} >= ${p_budget:.2f})")
+                        elif p_budget > 0.0 and total_cost >= (p_budget * 0.9):
+                            is_at_risk = True
+                            risk_reasons.append(f"Nearing budget limit ({total_cost/p_budget*100:.1f}%)")
+                            
+                        # Check deadline passed
+                        if proj.end_date and proj.end_date != "N/A":
+                            try:
+                                p_end = datetime.strptime(proj.end_date, "%Y-%m-%d")
+                                if p_end < now:
+                                    is_at_risk = True
+                                    risk_reasons.append("Project deadline has passed")
+                            except:
+                                pass
+                                
+                        # Check missing SRS
+                        srs_exists = session.query(SRS_Documents).filter_by(project_id=proj.id).first()
+                        if not srs_exists:
+                            is_at_risk = True
+                            risk_reasons.append("SRS Document is missing")
+                            
+                        if is_at_risk:
+                            reason_str = ", ".join(risk_reasons)
+                            title = f"Project at Risk: {proj.name}"
+                            msg = f"Project '{proj.name}' is flagged as at risk due to: {reason_str}."
+                            
+                            # Check if notification already exists
+                            exists = session.query(InAppNotification).filter_by(
+                                user_id=user_id,
+                                title=title,
+                                is_read=False
+                            ).first()
+                            
+                            if not exists:
+                                new_notif = InAppNotification(
+                                    user_id=user_id,
+                                    title=title,
+                                    message=msg,
+                                    is_read=False
+                                )
+                                session.add(new_notif)
+                                
+                    # B. Check Milestones at Risk/Delayed
+                    # Get assigned milestones (via MilestoneAssignments)
+                    assigned_milestones = session.query(ProjectTimeline, Projects.name).join(
+                        MilestoneAssignments, ProjectTimeline.id == MilestoneAssignments.milestone_id
+                    ).join(
+                        Projects, ProjectTimeline.project_id == Projects.id
+                    ).filter(
+                        MilestoneAssignments.employee_id == user_id,
+                        func.lower(func.coalesce(ProjectTimeline.status, '')) != 'completed'
+                    ).all()
+                    
+                    for milestone, proj_name in assigned_milestones:
+                        is_m_at_risk = False
+                        m_reasons = []
+                        
+                        m_status = (milestone.status or "").lower()
+                        if m_status == "delayed" or m_status == "at risk":
+                            is_m_at_risk = True
+                            m_reasons.append(f"Status is '{milestone.status}'")
+                            
+                        # Check deadline
+                        if milestone.expected_end and milestone.expected_end < now:
+                            is_m_at_risk = True
+                            m_reasons.append("Milestone deadline has passed")
+                            
+                        if is_m_at_risk:
+                            reason_str = ", ".join(m_reasons)
+                            title = f"Milestone Delayed: {milestone.milestone_name}"
+                            msg = f"Milestone '{milestone.milestone_name}' in project '{proj_name}' is delayed or at risk. Details: {reason_str}."
+                            
+                            exists = session.query(InAppNotification).filter_by(
+                                user_id=user_id,
+                                title=title,
+                                is_read=False
+                            ).first()
+                            
+                            if not exists:
+                                new_notif = InAppNotification(
+                                    user_id=user_id,
+                                    title=title,
+                                    message=msg,
+                                    is_read=False
+                                )
+                                session.add(new_notif)
+                                
+                    session.commit()
+                # ----------------------------------------------------
                 
                 total_notifs = session.query(InAppNotification).filter_by(user_id=user_id).order_by(InAppNotification.created_at.desc()).all()
                 if len(total_notifs) > 50:
@@ -2910,7 +3377,7 @@ class DatabaseOperations:
                 session.rollback()
                 return self._handle_error("delete_company_holiday", e)
 
-    def bulk_update_working_hours(self, working_hours: float, employee_ids: list = None, department: str = None, role_id: str = None) -> str:
+    def bulk_update_working_hours(self, working_hours: float, employee_ids: list = None, department: str = None, role_id: str = None, shift_start_time: str = None, shift_end_time: str = None) -> str:
         with self.SessionLocal() as session:
             try:
                 from src.database.database_tables import Employees, Departments_Roles
@@ -2925,6 +3392,10 @@ class DatabaseOperations:
                 count = 0
                 for emp in query.all():
                     emp.working_hours = working_hours
+                    if shift_start_time is not None:
+                        emp.shift_start_time = shift_start_time
+                    if shift_end_time is not None:
+                        emp.shift_end_time = shift_end_time
                     count += 1
                 session.commit()
                 return json.dumps({"success": True, "message": f"Updated working hours to {working_hours} for {count} employees."})
@@ -2936,6 +3407,15 @@ class DatabaseOperations:
         with self.SessionLocal() as session:
             try:
                 from src.database.database_tables import MilestoneAssignments, ProjectTimeline, Projects
+                # Pre-calculate project costs
+                dev_costs = {row.project_id: float(row.cost or 0) for row in session.query(
+                    DeveloperTasks.project_id, func.sum(DeveloperTasks.employee_cost).label('cost')
+                ).group_by(DeveloperTasks.project_id).all()}
+                
+                content_costs = {row.project_id: float(row.cost or 0) for row in session.query(
+                    ContentCreatorTasks.project_id, func.sum(ContentCreatorTasks.employee_cost).label('cost')
+                ).group_by(ContentCreatorTasks.project_id).all()}
+
                 query = session.query(
                     ProjectTimeline.id.label("milestone_id"),
                     ProjectTimeline.milestone_name.label("milestone_title"),
@@ -2945,8 +3425,16 @@ class DatabaseOperations:
                     ProjectTimeline.actual_start.label("actual_start"),
                     ProjectTimeline.actual_end.label("actual_end"),
                     ProjectTimeline.remarks.label("remarks"),
+                    ProjectTimeline.sprint_name.label("sprint_name"),
+                    ProjectTimeline.module_name.label("module_name"),
+                    ProjectTimeline.feature_name.label("feature_name"),
+                    ProjectTimeline.work_type.label("work_type"),
+                    ProjectTimeline.repo_name.label("repo_name"),
                     Projects.id.label("project_id"),
-                    Projects.name.label("project_name")
+                    Projects.name.label("project_name"),
+                    Projects.budget.label("project_budget"),
+                    Projects.end_date.label("project_end_date"),
+                    Projects.status.label("project_status")
                 ).join(
                     MilestoneAssignments, ProjectTimeline.id == MilestoneAssignments.milestone_id
                 ).join(
@@ -2955,8 +3443,42 @@ class DatabaseOperations:
                     MilestoneAssignments.employee_id == employee_id
                 ).order_by(ProjectTimeline.expected_start.asc())
                 
+                now = datetime.now()
                 results = []
                 for row in query.all():
+                    # Calculate project risk
+                    proj_cost = dev_costs.get(row.project_id, 0.0) + content_costs.get(row.project_id, 0.0)
+                    proj_budget = float(row.project_budget) if row.project_budget else 0.0
+                    proj_at_risk = False
+                    proj_risk_reasons = []
+                    
+                    p_status = (row.project_status or "").lower()
+                    if "risk" in p_status or "delayed" in p_status or "critical" in p_status:
+                        proj_at_risk = True
+                        proj_risk_reasons.append(f"Status: {row.project_status}")
+                    if proj_budget > 0.0 and proj_cost >= proj_budget:
+                        proj_at_risk = True
+                        proj_risk_reasons.append("Budget Exceeded")
+                    elif proj_budget > 0.0 and proj_cost >= (proj_budget * 0.9):
+                        proj_at_risk = True
+                        proj_risk_reasons.append("Nearing Budget Limit")
+                    if row.project_end_date and row.project_end_date != "N/A":
+                        try:
+                            p_end = datetime.strptime(row.project_end_date, "%Y-%m-%d")
+                            if p_end < now:
+                                proj_at_risk = True
+                                proj_risk_reasons.append("Deadline Passed")
+                        except:
+                            pass
+                            
+                    # Milestone risk
+                    is_delayed = False
+                    m_status = (row.milestone_status or "").lower()
+                    if m_status == "delayed" or m_status == "at risk":
+                        is_delayed = True
+                    if row.expected_end and row.expected_end < now and m_status != "completed":
+                        is_delayed = True
+                        
                     results.append({
                         "id": row.milestone_id,
                         "milestone_name": row.milestone_title,
@@ -2966,8 +3488,16 @@ class DatabaseOperations:
                         "actual_start": str(row.actual_start) if row.actual_start else None,
                         "actual_end": str(row.actual_end) if row.actual_end else None,
                         "remarks": row.remarks,
+                        "sprint_name": row.sprint_name,
+                        "module_name": row.module_name,
+                        "feature_name": row.feature_name,
+                        "work_type": row.work_type,
+                        "repo_name": row.repo_name,
                         "project_id": row.project_id,
-                        "projectName": row.project_name
+                        "projectName": row.project_name,
+                        "is_delayed": is_delayed,
+                        "project_at_risk": proj_at_risk,
+                        "project_risk_reasons": proj_risk_reasons
                     })
                 return json.dumps(results, indent=4)
             except Exception as e:
@@ -3096,6 +3626,68 @@ class DatabaseOperations:
             except Exception as e:
                 session.rollback()
                 return self._handle_error("mark_client_receivable_done", e, context={"receivable_id": receivable_id})
+
+    def get_pending_handover_tasks(self, assignee_id: str, colleague_id: str) -> str:
+        with self.SessionLocal() as session:
+            try:
+                # Query LeaveRequest for approved, pending handovers
+                leave_handovers = session.query(LeaveRequest).filter(
+                    LeaveRequest.backup_employee_id == assignee_id,
+                    LeaveRequest.employee_id == colleague_id,
+                    LeaveRequest.status == 'Approved',
+                    LeaveRequest.handover_status != 'Completed'
+                ).all()
+
+                combined = []
+                for lh in leave_handovers:
+                    sprint, module, feature = "N/A", "N/A", "N/A"
+                    if lh.milestone_id:
+                        milestone = session.query(ProjectTimeline).filter_by(id=lh.milestone_id).first()
+                        if milestone:
+                            sprint = milestone.sprint_name or "N/A"
+                            module = milestone.module_name or "N/A"
+                            feature = milestone.feature_name or "N/A"
+                            
+                    combined.append({
+                        "id": lh.id,
+                        "project_id": lh.project_id or "",
+                        "milestone_id": lh.milestone_id or "",
+                        "task_type": lh.task_type or "developer",
+                        "pending_work_summary": lh.pending_work_summary or "N/A",
+                        "task_performed": lh.pending_work_summary or "N/A",
+                        "sprint": sprint,
+                        "module": module,
+                        "feature": feature,
+                        "work_type": "Backend" if lh.task_type == "developer" else "Marketing"
+                    })
+
+                # Fallback: Query DeveloperTasks and ContentCreatorTasks for compatibility
+                dev_tasks = session.query(DeveloperTasks).filter(
+                    DeveloperTasks.is_handover == True,
+                    DeveloperTasks.handover_for_employee_id == assignee_id,
+                    DeveloperTasks.employee_id == colleague_id,
+                    DeveloperTasks.task_status != "Completed"
+                ).all()
+                for t in dev_tasks:
+                    d = self.model_to_dict(t)
+                    d['task_type'] = 'developer'
+                    combined.append(d)
+
+                content_tasks = session.query(ContentCreatorTasks).filter(
+                    ContentCreatorTasks.is_handover == True,
+                    ContentCreatorTasks.handover_for_employee_id == assignee_id,
+                    ContentCreatorTasks.employee_id == colleague_id,
+                    ContentCreatorTasks.task_status != "Completed"
+                ).all()
+                for t in content_tasks:
+                    c = self.model_to_dict(t)
+                    c['task_type'] = 'content_creator'
+                    combined.append(c)
+
+                return json.dumps(combined, indent=4, default=str)
+            except Exception as e:
+                return self._handle_error("get_pending_handover_tasks", e)
+
 
 
 

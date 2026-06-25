@@ -46,6 +46,32 @@ async def lifespan(app: FastAPI):
     # Ensure all tables are created (Safe to call, won't drop existing data)
     Base.metadata.create_all(bind=engine)
 
+    # Run runtime migrations to add shift start/end columns to employees table if missing
+    # with engine.connect() as conn:
+    #     try:
+    #         conn.execute(text("ALTER TABLE employees ADD COLUMN shift_start_time VARCHAR DEFAULT '09:00'"))
+    #         conn.commit()
+    #         logger.info("SYSTEM STARTUP MIGRATION: Added shift_start_time column to employees table.")
+    #     except Exception:
+    #         pass
+    #     try:
+    #         conn.execute(text("ALTER TABLE employees ADD COLUMN shift_end_time VARCHAR DEFAULT '18:00'"))
+    #         conn.commit()
+    #         logger.info("SYSTEM STARTUP MIGRATION: Added shift_end_time column to employees table.")
+    #     except Exception:
+    #         pass
+    #     try:
+    #         conn.execute(text("ALTER TABLE attendance ADD COLUMN attendance_status VARCHAR DEFAULT 'Present'"))
+    #         conn.commit()
+    #         logger.info("SYSTEM STARTUP MIGRATION: Added attendance_status column to attendance table.")
+    #     except Exception:
+    #         pass
+    #     try:
+    #         conn.execute(text("ALTER TABLE srs_documents ADD COLUMN srs_text TEXT"))
+    #         conn.commit()
+    #         logger.info("SYSTEM STARTUP MIGRATION: Added srs_text column to srs_documents table.")
+    #     except Exception:
+    #         pass
     with SessionLocal() as session:
         try:
             admin_count = session.query(Admins).count()
@@ -145,4 +171,4 @@ async def broadcast_middleware(request: Request, call_next):
 if __name__ == "__main__":
     # pyrefly: ignore [missing-import]
     import uvicorn
-    uvicorn.run("main:app", host="127.0.0.1", port=8001, reload=True)
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)

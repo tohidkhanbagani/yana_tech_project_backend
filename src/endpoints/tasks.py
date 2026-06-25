@@ -260,3 +260,12 @@ def update_content_task(task_id: str, task_update: ContentTaskUpdate, current_us
     except Exception as e:
         logger.error(f"Router Error in update_content_task: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to update content creator timesheet.")
+
+@router.get("/handover/pending", tags=["Timesheets & Tasks"])
+def get_pending_handover_tasks(assignee_id: str, colleague_id: str, current_user: dict = Depends(get_current_user)):
+    try:
+        response = db.get_pending_handover_tasks(assignee_id, colleague_id)
+        return handle_response(response)
+    except Exception as e:
+        logger.error(f"Router Error in get_pending_handover_tasks: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to retrieve pending handover tasks.")

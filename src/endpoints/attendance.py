@@ -23,6 +23,9 @@ class LeaveRequestSubmit(BaseModel):
     pending_work_summary: Optional[str] = "N/A"
     backup_employee_id: Optional[str] = "N/A"
     deployment_pending: Optional[str] = "No"
+    project_id: Optional[str] = None
+    milestone_id: Optional[str] = None
+    task_type: Optional[str] = None
 
 class LeaveRequestStatusUpdate(BaseModel):
     status: str
@@ -38,7 +41,7 @@ def employee_check_in(req: CheckInRequest, request: Request, current_user: dict 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Router Error in check_in: {str(e)}", exc_info=True)
+        logger.error(f"Router Error in employee_check_in: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to check in.")
 
 @router.post("/attendance/check-out", tags=["Attendance"])
@@ -46,11 +49,19 @@ def employee_check_out(current_user: dict = Depends(get_current_user)):
     try:
         response = db.check_out(current_user["id"])
         return handle_response(response)
-    except HTTPException:
-        raise
     except Exception as e:
-        logger.error(f"Router Error in check_out: {str(e)}", exc_info=True)
+        logger.error(f"Router Error in employee_check_out: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to check out.")
+
+@router.get("/attendance/me", tags=["Attendance"])
+@router.get("/attendance/my-status", tags=["Attendance"])
+def get_my_attendance_status(current_user: dict = Depends(get_current_user)):
+    try:
+        response = db.get_employee_attendance(current_user["id"])
+        return handle_response(response)
+    except Exception as e:
+        logger.error(f"Router Error in get_my_attendance_status: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to fetch attendance status.")
 
 @router.get("/attendance/all", tags=["Attendance"])
 def get_all_attendance(current_user: dict = Depends(get_current_user)):
@@ -65,17 +76,6 @@ def get_all_attendance(current_user: dict = Depends(get_current_user)):
     except Exception as e:
         logger.error(f"Router Error in get_all_attendance: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to fetch attendance records.")
-
-@router.get("/attendance/me", tags=["Attendance"])
-def get_my_attendance(current_user: dict = Depends(get_current_user)):
-    try:
-        response = db.get_employee_attendance(current_user["id"])
-        return handle_response(response)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Router Error in get_my_attendance: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to fetch your attendance records.")
 
 @router.get("/attendance/login-history", tags=["Attendance"])
 def get_all_login_history(current_user: dict = Depends(get_current_user)):
@@ -116,7 +116,10 @@ def submit_leave_request(req: LeaveRequestSubmit, current_user: dict = Depends(g
             total_days=req.total_days,
             pending_work_summary=req.pending_work_summary,
             backup_employee_id=req.backup_employee_id,
-            deployment_pending=req.deployment_pending
+            deployment_pending=req.deployment_pending,
+            project_id=req.project_id,
+            milestone_id=req.milestone_id,
+            task_type=req.task_type
         )
         return handle_response(response)
     except HTTPException:
@@ -204,6 +207,8 @@ class HolidaySubmit(BaseModel):
 
 class WorkingHoursUpdate(BaseModel):
     working_hours: float
+    shift_start_time: Optional[str] = None
+    shift_end_time: Optional[str] = None
     employee_ids: Optional[list] = None
     department: Optional[str] = None
     role_id: Optional[str] = None
@@ -244,7 +249,14 @@ def update_working_hours(req: WorkingHoursUpdate, current_user: dict = Depends(g
     try:
         if current_user.get("role") != "admin":
             raise HTTPException(status_code=403, detail="Access denied.")
-        response = db.bulk_update_working_hours(req.working_hours, req.employee_ids, req.department, req.role_id)
+        response = db.bulk_update_working_hours(
+            req.working_hours,
+            req.employee_ids,
+            req.department,
+            req.role_id,
+            shift_start_time=req.shift_start_time,
+            shift_end_time=req.shift_end_time
+        )
         return handle_response(response)
     except Exception as e:
         logger.error(f"Router Error in update_working_hours: {str(e)}", exc_info=True)

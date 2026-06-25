@@ -317,8 +317,6 @@ def get_workforce_overview(current_user: dict = Depends(get_current_user)):
             from src.database.database_operations import DatabaseOperations
             db_ops = DatabaseOperations()
             db_ops.record_daily_absences_internal(session)
-
-            total_employees = session.query(Employees).filter(Employees.is_active == True).count()
             
             # Count distinct employees who checked in today
             active_attendance = session.query(Attendance.employee_id).filter(
@@ -326,8 +324,16 @@ def get_workforce_overview(current_user: dict = Depends(get_current_user)):
                 Attendance.status != "Absent"
             ).distinct().all()
             
-            active_today = len(active_attendance)
-            absent_today = total_employees - active_today
+            active_staff_ids_today = {row[0] for row in active_attendance if row[0]}
+            
+            # Fetch all active employees
+            all_active_employees = session.query(Employees, Departments_Roles.department_name).outerjoin(
+                Departments_Roles, Employees.role_id == Departments_Roles.id
+            ).filter(Employees.is_active == True).all()
+            
+            total_employees = len(all_active_employees)
+            active_today = len(active_staff_ids_today)
+            absent_today = max(0, total_employees - active_today)
 
             # Resource Distribution (By Department)
             distribution = session.query(Departments_Roles.department_name, func.count(Employees.id))\
@@ -335,29 +341,14 @@ def get_workforce_overview(current_user: dict = Depends(get_current_user)):
                                   .filter(Employees.is_active == True)\
                                   .group_by(Departments_Roles.department_name).all()
 
-            # Query absent employees details
-            absent_records = session.query(
-                Employees.full_name,
-                Employees.username,
-                Departments_Roles.department_name
-            ).join(
-                Attendance, Attendance.employee_id == Employees.id
-            ).outerjoin(
-                Departments_Roles, Employees.role_id == Departments_Roles.id
-            ).filter(
-                Attendance.date.between(start_today, end_today),
-                Attendance.status == "Absent",
-                Employees.is_active == True
-            ).all()
-
-            absent_list = [
-                {
-                    "name": name or "Unknown",
-                    "username": username or "N/A",
-                    "department": dept or "General"
-                }
-                for name, username, dept in absent_records
-            ]
+            absent_list = []
+            for emp, dept in all_active_employees:
+                if emp.id not in active_staff_ids_today:
+                    absent_list.append({
+                        "name": emp.full_name or "Unknown",
+                        "username": emp.username or "N/A",
+                        "department": dept or "General"
+                    })
 
             return {
                 "radar": {
@@ -1282,16 +1273,23 @@ def get_manager_summary(current_user: dict = Depends(get_current_user)):
             # General attendance logs for these resources
             attendance_history = []
             if assigned_emp_ids:
-                attn = session.query(Attendance, Employees.full_name).join(Employees, Attendance.employee_id == Employees.id).filter(
+                attn = session.query(
+                    Attendance, 
+                    Employees.full_name,
+                    Employees.shift_start_time,
+                    Employees.shift_end_time
+                ).join(Employees, Attendance.employee_id == Employees.id).filter(
                     Attendance.employee_id.in_(assigned_emp_ids)
                 ).order_by(desc(Attendance.date)).limit(10).all()
-                for a, full_name in attn:
+                for a, full_name, shift_start, shift_end in attn:
                     attendance_history.append({
                         "employee_name": full_name,
                         "date": a.date.isoformat() if a.date else None,
                         "status": a.status,
                         "check_in": a.check_in_time.isoformat() if a.check_in_time else None,
-                        "check_out": a.check_out_time.isoformat() if a.check_out_time else None
+                        "check_out": a.check_out_time.isoformat() if a.check_out_time else None,
+                        "shift_start": shift_start or "09:00",
+                        "shift_end": shift_end or "18:00"
                     })
 
             return {

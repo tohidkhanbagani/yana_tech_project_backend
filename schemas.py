@@ -215,7 +215,8 @@ class SRSCreate(ConfiguredBaseModel):
     project_id: str = Field(..., description="UUID of the parent project")
     document_title: str = Field(..., description="Title of the SRS document")
     version: Optional[str] = "v1.0"
-    file_url_or_path: str = Field(..., description="Location of the stored file")
+    file_url_or_path: Optional[str] = Field(None, description="Location of the stored file")
+    srs_text: Optional[str] = Field(None, description="Pasted raw SRS text content")
     status: Optional[str] = Field("Draft", description="Draft, Approved, Archived")
 
 class TimelineCreate(ConfiguredBaseModel):
@@ -278,6 +279,8 @@ class DeveloperTaskCreate(ConfiguredBaseModel):
     is_overtime: Optional[bool] = False
     is_handover: Optional[bool] = False
     handover_for_employee_id: Optional[str] = None
+    handover_source_task_id: Optional[str] = None
+
 
     @field_validator('task_performed')
     def validate_task_performed(cls, v):
@@ -333,6 +336,8 @@ class DeveloperTaskUpdate(ConfiguredBaseModel):
     is_overtime: Optional[bool] = None
     is_handover: Optional[bool] = None
     handover_for_employee_id: Optional[str] = None
+    handover_source_task_id: Optional[str] = None
+
 
     @field_validator('task_performed')
     def validate_task_performed(cls, v):
@@ -398,6 +403,8 @@ class ContentTaskCreate(ConfiguredBaseModel):
     is_overtime: Optional[bool] = False
     is_handover: Optional[bool] = False
     handover_for_employee_id: Optional[str] = None
+    handover_source_task_id: Optional[str] = None
+
 
     @field_validator('task_performed')
     def validate_task_performed(cls, v):
@@ -431,6 +438,8 @@ class ContentTaskUpdate(ConfiguredBaseModel):
     is_overtime: Optional[bool] = None
     is_handover: Optional[bool] = None
     handover_for_employee_id: Optional[str] = None
+    handover_source_task_id: Optional[str] = None
+
 
     @field_validator('task_performed')
     def validate_task_performed(cls, v):
@@ -453,6 +462,7 @@ class SRSUpdate(ConfiguredBaseModel):
     document_title: Optional[str] = None
     version: Optional[str] = None
     file_url_or_path: Optional[str] = None
+    srs_text: Optional[str] = None
     status: Optional[str] = None
     approved_by: Optional[str] = None
 

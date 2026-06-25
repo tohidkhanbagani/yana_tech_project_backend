@@ -93,9 +93,10 @@ def delete_project(project_id: str, current_user: dict = Depends(get_current_use
 # ==========================================
 
 @router.get("/timeline/{project_id}", tags=["Project Management"])
-def get_project_timeline(project_id: str, current_user: dict = Depends(get_current_user)):
+def get_project_timeline(project_id: str, employee_id: str = None, current_user: dict = Depends(get_current_user)):
     try:
-        employee_id = current_user.get("id") if current_user.get("role") != "admin" else None
+        if current_user.get("role") != "admin" and not employee_id:
+            employee_id = current_user.get("id")
         response = db.get_project_timeline(project_id, employee_id=employee_id)
         return handle_response(response)
     except HTTPException:

@@ -109,6 +109,8 @@ class Employees(Base):
     
     created_at = Column(DateTime, default=datetime.now)
     working_hours = Column(Float, nullable=True, default=8.0)
+    shift_start_time = Column(String, nullable=True, default="09:00")
+    shift_end_time = Column(String, nullable=True, default="18:00")
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 class LoginHistory(Base):
@@ -224,10 +226,11 @@ class SRS_Documents(Base):
     project_id = Column(String, ForeignKey("projects.id"), nullable=False)
     document_title = Column(String, nullable=False)
     version = Column(String, nullable=True, default="v1.0")
-    file_url_or_path = Column(String, nullable=False)
+    file_url_or_path = Column(String, nullable=True)
     
     # NEW COLUMN for the parsed PDF content
     parsed_content = Column(Text, nullable=True) 
+    srs_text = Column(Text, nullable=True)
     
     approved_by = Column(String, nullable=True, default="N/A")
     status = Column(String, nullable=True, default="Draft")
@@ -351,6 +354,8 @@ class DeveloperTasks(Base):
     is_overtime = Column(Boolean, default=False, nullable=True)
     is_handover = Column(Boolean, default=False, nullable=True)
     handover_for_employee_id = Column(String, nullable=True)
+    handover_source_task_id = Column(String, nullable=True)
+
 
 
 class ContentCreatorTasks(Base):
@@ -399,6 +404,8 @@ class ContentCreatorTasks(Base):
     is_overtime = Column(Boolean, default=False, nullable=True)
     is_handover = Column(Boolean, default=False, nullable=True)
     handover_for_employee_id = Column(String, nullable=True)
+    handover_source_task_id = Column(String, nullable=True)
+
 
 
 class Attendance(Base):
@@ -410,6 +417,7 @@ class Attendance(Base):
     check_out_time = Column(DateTime, nullable=True)
     total_hours = Column(Float, nullable=True, default=0.0)
     status = Column(String, nullable=False, default="Present") # Present, Late, Half-Day, Absent, On Leave
+    attendance_status = Column(String, nullable=True, default="Present") # Present, Late, Half-Day, Absent, On Leave, Extended Shift
     ip_address = Column(String, nullable=True)
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.now)
@@ -429,6 +437,10 @@ class LeaveRequest(Base):
     pending_work_summary = Column(Text, nullable=True, default="N/A")
     backup_employee_id = Column(String, nullable=True, default="N/A")
     deployment_pending = Column(String, nullable=True, default="No")
+    project_id = Column(String, nullable=True)
+    milestone_id = Column(String, nullable=True)
+    task_type = Column(String, nullable=True)
+    handover_status = Column(String, nullable=True, default="Pending")
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
