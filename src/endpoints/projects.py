@@ -209,6 +209,8 @@ def get_project_srs(project_id: str, current_user: dict = Depends(get_current_us
 
 @router.post("/srs/create", tags=["Project Management"])
 def create_srs_document(srs: SRSCreate, current_user: dict = Depends(get_current_user)):
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Only administrators can manage SRS documents.")
     try:
         data = srs.model_dump(exclude_unset=True)
         # Note: If you want to auto-assign the 'approved_by', you can link current_user.get("username") here.
@@ -222,6 +224,8 @@ def create_srs_document(srs: SRSCreate, current_user: dict = Depends(get_current
 
 @router.put("/srs/update/{srs_id}", tags=["Project Management"])
 def update_srs_document(srs_id: str, srs: SRSUpdate, current_user: dict = Depends(get_current_user)):
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Only administrators can manage SRS documents.")
     try:
         data = srs.model_dump(exclude_unset=True)
         if not data:
@@ -236,6 +240,8 @@ def update_srs_document(srs_id: str, srs: SRSUpdate, current_user: dict = Depend
 
 @router.delete("/srs/delete/{srs_id}", tags=["Project Management"])
 def delete_srs_document(srs_id: str, current_user: dict = Depends(get_current_user)):
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Only administrators can manage SRS documents.")
     try:
         response = db.delete_srs_document(srs_id)
         return handle_response(response)

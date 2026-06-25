@@ -1080,13 +1080,30 @@ class DatabaseOperations:
                 if not document:
                     return json.dumps({"error": "SRS document not found"})
                 
-                # If local file, delete it
-                if document.file_url_or_path and not document.file_url_or_path.startswith("http"):
-                    if os.path.exists(document.file_url_or_path):
-                        os.remove(document.file_url_or_path)
+                project_id = document.project_id
+                file_path = document.file_url_or_path
+                
+                # Update any projects referencing this srs_id to point to the next latest SRS, or None
+                referencing_projects = session.query(Projects).filter_by(srs_id=srs_id).all()
+                for project in referencing_projects:
+                    next_srs = session.query(SRS_Documents).filter(
+                        SRS_Documents.project_id == project_id,
+                        SRS_Documents.id != srs_id
+                    ).order_by(SRS_Documents.created_at.desc()).first()
+                    
+                    project.srs_id = next_srs.id if next_srs else None
                 
                 session.delete(document)
                 session.commit()
+                
+                # Physical file deletion only after database transaction commit is successful
+                if file_path and not file_path.startswith("http") and file_path != "[Pasted SRS Text]":
+                    if os.path.exists(file_path):
+                        try:
+                            os.remove(file_path)
+                        except Exception as file_err:
+                            logger.error(f"SYSTEM WARN in delete_srs_document physical file cleanup: {str(file_err)}")
+                            
                 return json.dumps({"message": "SRS document deleted successfully"})
             except Exception as e:
                 session.rollback()
