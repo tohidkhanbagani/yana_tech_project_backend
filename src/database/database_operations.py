@@ -2698,7 +2698,7 @@ class DatabaseOperations:
                         diff = now - today_shift_start
                         diff_seconds = diff.total_seconds()
                         if diff_seconds > 4 * 3600:
-                            attendance_status = "Absent"
+                            attendance_status = "Half-Day"
                         elif diff_seconds > 2 * 3600:
                             attendance_status = "Half-Day"
                         elif diff_seconds > 15 * 60:

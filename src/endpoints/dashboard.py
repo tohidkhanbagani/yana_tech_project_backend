@@ -1234,9 +1234,13 @@ def get_manager_summary(current_user: dict = Depends(get_current_user)):
                     running_at_loss += 1
 
             # C. Assigned resources & attendance
-            # Get employee_ids assigned to manager's projects
-            assignments = session.query(ProjectAssignments.employee_id).filter(ProjectAssignments.project_id.in_(project_ids)).distinct().all() if project_ids else []
-            assigned_emp_ids = [a[0] for a in assignments]
+            # Get employee_ids assigned to manager's projects (or all active employees if Admin/SystemAdmin)
+            if current_user.get("access_level") == "ManagerAdmin":
+                assignments = session.query(ProjectAssignments.employee_id).filter(ProjectAssignments.project_id.in_(project_ids)).distinct().all() if project_ids else []
+                assigned_emp_ids = [a[0] for a in assignments]
+            else:
+                active_emps = session.query(Employees.id).filter(Employees.is_active == True).all()
+                assigned_emp_ids = [e[0] for e in active_emps]
             
             # Fetch assigned employee records
             assigned_employees = session.query(Employees).filter(Employees.id.in_(assigned_emp_ids)).all() if assigned_emp_ids else []
@@ -1273,14 +1277,22 @@ def get_manager_summary(current_user: dict = Depends(get_current_user)):
             # General attendance logs for these resources
             attendance_history = []
             if assigned_emp_ids:
+                # Automatically record today's absences first if they haven't been recorded yet
+                from src.database.database_operations import DatabaseOperations
+                db_ops = DatabaseOperations()
+                db_ops.record_daily_absences_internal(session)
+
+                # Fetch today's records for these employees
                 attn = session.query(
                     Attendance, 
                     Employees.full_name,
                     Employees.shift_start_time,
                     Employees.shift_end_time
                 ).join(Employees, Attendance.employee_id == Employees.id).filter(
-                    Attendance.employee_id.in_(assigned_emp_ids)
-                ).order_by(desc(Attendance.date)).limit(10).all()
+                    Attendance.employee_id.in_(assigned_emp_ids),
+                    Attendance.date.between(start_today, end_today)
+                ).order_by(desc(Attendance.date)).all()
+
                 for a, full_name, shift_start, shift_end in attn:
                     attendance_history.append({
                         "employee_name": full_name,
