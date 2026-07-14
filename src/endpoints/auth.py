@@ -26,7 +26,17 @@ router = APIRouter(
 # ==========================================
 
 import os
-SECRET_KEY = os.getenv("SECRET_KEY", "yana-super-secret-key-change-this-in-production")
+import secrets
+from pathlib import Path
+from dotenv import load_dotenv
+
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
+load_dotenv(dotenv_path=BASE_DIR / ".env")
+
+SECRET_KEY = os.getenv("SECRET_KEY")
+if not SECRET_KEY or SECRET_KEY == "yana-super-secret-key-change-this-in-production":
+    SECRET_KEY = secrets.token_hex(32)
+
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 480 # Extended to 8 hours for workday comfort
 
@@ -34,6 +44,8 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 
 def verify_password(plain_password, hashed_password):
+    if len(plain_password) > 128:
+        return False
     return pwd_context.verify(plain_password, hashed_password)
 
 def create_access_token(data: dict, expires_delta: timedelta | None = None):
@@ -83,6 +95,17 @@ def handle_response(result_str: str):
 #         CURRENT USER DEPENDENCY
 # ==========================================
 
+def check_template_injection(value: str):
+    if not value:
+        return
+    delimiters = ["{{", "}}", "${", "}", "<%", "%>"]
+    for delim in delimiters:
+        if delim in value:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Input contains disallowed template injection characters: {delim}"
+            )
+
 def get_current_user(token: str = Depends(oauth2_scheme)):
     """
     Decodes JWT token and intelligently determines whether to fetch an Admin or an Employee 
@@ -99,6 +122,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
         username: str = payload.get("sub")
         user_role: str = payload.get("role")
         user_id: str = payload.get("id")
+        session_id: str = payload.get("session_id")
         
         if username is None or user_role is None or user_id is None:
             raise credentials_exception
@@ -114,6 +138,12 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
                 user = session.query(Admins).filter(Admins.id == user_id).first()
                 if user is None:
                     raise credentials_exception
+                if session_id is None or user.current_session_id != session_id:
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Session invalidated. You have been logged in from another device/browser.",
+                        headers={"WWW-Authenticate": "Bearer"},
+                    )
                 return {"id": user.id, "username": user.username, "role": "admin", "access_level": user.access_level}
                 
             # 2. Employee Verification
@@ -121,6 +151,12 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
                 user = session.query(Employees).filter(Employees.id == user_id).first()
                 if user is None or not user.is_active:
                     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Employee account is disabled or missing.")
+                if session_id is None or user.current_session_id != session_id:
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Session invalidated. You have been logged in from another device/browser.",
+                        headers={"WWW-Authenticate": "Bearer"},
+                    )
                 return {"id": user.id, "username": user.username, "role": "employee"}
                 
             else:
@@ -144,6 +180,11 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends()):
     Intelligently checks the Admins table first, and falls back to the Employees table.
     Logs every login attempt accurately into the LoginHistory table.
     """
+    if len(form_data.password) > 128:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Password too long (max 128 characters).")
+        
+    check_template_injection(form_data.username)
+    
     try:
         with SessionLocal() as session:
             client_ip = request.client.host if request.client else "Unknown"
@@ -153,9 +194,29 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends()):
             admin = session.query(Admins).filter(Admins.username == form_data.username).first()
             if admin and verify_password(form_data.password, admin.password):
                 
+                # Check for active WebSocket connection (Single Active Login check)
+                from src.endpoints.websockets import manager
+                if manager.is_user_connected(admin.id):
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="This account is currently logged in on another device/browser."
+                    )
+                
+                # Update current session ID in DB
+                import uuid
+                session_id = str(uuid.uuid4())
+                admin.current_session_id = session_id
+                session.commit()
+
                 # Log success & Generate Token
                 db.log_login_history(user_id=admin.id, user_role="Admin", ip_address=client_ip, user_agent=user_agent)
-                token_data = {"sub": admin.username, "id": admin.id, "role": "admin", "access_level": admin.access_level}
+                token_data = {
+                    "sub": admin.username,
+                    "id": admin.id,
+                    "role": "admin",
+                    "access_level": admin.access_level,
+                    "session_id": session_id
+                }
                 access_token = create_access_token(data=token_data, expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
                 
                 return {"access_token": access_token, "token_type": "bearer"}
@@ -167,9 +228,28 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends()):
                 if not employee.is_active:
                     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Your account has been deactivated. Contact HR.")
 
+                # Check for active WebSocket connection (Single Active Login check)
+                from src.endpoints.websockets import manager
+                if manager.is_user_connected(employee.id):
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="This account is currently logged in on another device/browser."
+                    )
+
+                # Update current session ID in DB
+                import uuid
+                session_id = str(uuid.uuid4())
+                employee.current_session_id = session_id
+                session.commit()
+
                 # Log success & Generate Token
                 db.log_login_history(user_id=employee.id, user_role="Employee", ip_address=client_ip, user_agent=user_agent)
-                token_data = {"sub": employee.username, "id": employee.id, "role": "employee"}
+                token_data = {
+                    "sub": employee.username,
+                    "id": employee.id,
+                    "role": "employee",
+                    "session_id": session_id
+                }
                 access_token = create_access_token(data=token_data, expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
                 
                 return {"access_token": access_token, "token_type": "bearer"}
