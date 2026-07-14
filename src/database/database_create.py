@@ -54,8 +54,8 @@ if DATABASE_URL:
             DATABASE_URL,
             future=True,
             echo=False,
-            pool_size=5,
-            max_overflow=0,
+            pool_size=20,
+            max_overflow=10,
             pool_timeout=15,
             pool_recycle=600,
             pool_pre_ping=True

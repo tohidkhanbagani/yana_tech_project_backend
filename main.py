@@ -1,5 +1,32 @@
-from openpyxl.descriptors import String
+# Initialize environment and auto-generate SECRET_KEY if missing
 import os
+import secrets
+from pathlib import Path
+from dotenv import load_dotenv
+
+BASE_DIR = Path(__file__).resolve().parent
+dotenv_path = BASE_DIR / ".env"
+load_dotenv(dotenv_path=dotenv_path)
+
+secret_key = os.getenv("SECRET_KEY")
+if not secret_key or secret_key == "yana-super-secret-key-change-this-in-production":
+    new_key = secrets.token_hex(32)
+    os.environ["SECRET_KEY"] = new_key
+    content = ""
+    if dotenv_path.exists():
+        content = dotenv_path.read_text(encoding="utf-8")
+    lines = content.splitlines()
+    found = False
+    for i, line in enumerate(lines):
+        if line.startswith("SECRET_KEY="):
+            lines[i] = f"SECRET_KEY={new_key}"
+            found = True
+            break
+    if not found:
+        lines.append(f"SECRET_KEY={new_key}")
+    dotenv_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+from openpyxl.descriptors import String
 import logging
 from contextlib import asynccontextmanager
 # pyrefly: ignore [missing-import]
@@ -46,32 +73,21 @@ async def lifespan(app: FastAPI):
     # Ensure all tables are created (Safe to call, won't drop existing data)
     Base.metadata.create_all(bind=engine)
 
-    # Run runtime migrations to add shift start/end columns to employees table if missing
-    # with engine.connect() as conn:
-    #     try:
-    #         conn.execute(text("ALTER TABLE employees ADD COLUMN shift_start_time VARCHAR DEFAULT '09:00'"))
-    #         conn.commit()
-    #         logger.info("SYSTEM STARTUP MIGRATION: Added shift_start_time column to employees table.")
-    #     except Exception:
-    #         pass
-    #     try:
-    #         conn.execute(text("ALTER TABLE employees ADD COLUMN shift_end_time VARCHAR DEFAULT '18:00'"))
-    #         conn.commit()
-    #         logger.info("SYSTEM STARTUP MIGRATION: Added shift_end_time column to employees table.")
-    #     except Exception:
-    #         pass
-    #     try:
-    #         conn.execute(text("ALTER TABLE attendance ADD COLUMN attendance_status VARCHAR DEFAULT 'Present'"))
-    #         conn.commit()
-    #         logger.info("SYSTEM STARTUP MIGRATION: Added attendance_status column to attendance table.")
-    #     except Exception:
-    #         pass
-    #     try:
-    #         conn.execute(text("ALTER TABLE srs_documents ADD COLUMN srs_text TEXT"))
-    #         conn.commit()
-    #         logger.info("SYSTEM STARTUP MIGRATION: Added srs_text column to srs_documents table.")
-    #     except Exception:
-    #         pass
+    # Run runtime migrations for database schema upgrades
+    with engine.connect() as conn:
+        try:
+            conn.execute(text("ALTER TABLE admins ADD COLUMN current_session_id VARCHAR"))
+            conn.commit()
+            logger.info("SYSTEM STARTUP MIGRATION: Added current_session_id column to admins table.")
+        except Exception:
+            pass
+        try:
+            conn.execute(text("ALTER TABLE employees ADD COLUMN current_session_id VARCHAR"))
+            conn.commit()
+            logger.info("SYSTEM STARTUP MIGRATION: Added current_session_id column to employees table.")
+        except Exception:
+            pass
+
     with SessionLocal() as session:
         try:
             admin_count = session.query(Admins).count()
@@ -145,6 +161,16 @@ app.include_router(checklists.router)
 
 
 @app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains; preload"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Content-Security-Policy"] = "upgrade-insecure-requests"
+    return response
+
+@app.middleware("http")
 async def broadcast_middleware(request: Request, call_next):
     response = await call_next(request)
     if request.method in ["POST", "PUT", "DELETE", "PATCH"]:
@@ -152,7 +178,8 @@ async def broadcast_middleware(request: Request, call_next):
             # We don't want to broadcast on login or file uploads generally, but doing it globally is safe enough for a small app.
             # Skip for login to prevent unnecessary broadcasts
             if "/auth/login" not in request.url.path:
-                await manager.broadcast({"action": "REFRESH_WORKSPACE"})
+                import asyncio
+                asyncio.create_task(manager.broadcast({"action": "REFRESH_WORKSPACE"}))
     return response
 
 # @app.middleware("http")

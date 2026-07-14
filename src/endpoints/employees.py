@@ -437,6 +437,8 @@ def delete_employee(employee_id: str, current_user: dict = Depends(get_current_u
     try:
         response = db.delete_employee(employee_id)
         return handle_response(response)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Router Error in delete_employee: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to delete employee profile.")
@@ -610,6 +612,27 @@ def approve_profile_unlock(employee_id: str, current_user: dict = Depends(get_cu
     except Exception as e:
         logger.error(f"Router Error in approve_profile_unlock: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to approve profile unlock.")
+
+@router.post("/employees/deny-unlock/{employee_id}", tags=["Employees"])
+def deny_profile_unlock(employee_id: str, current_user: dict = Depends(get_current_user)):
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Access denied. Only administrators can deny unlock requests.")
+    try:
+        with SessionLocal() as session:
+            from src.database.database_tables import Employees
+            employee = session.query(Employees).filter(Employees.id == employee_id).first()
+            if not employee:
+                raise HTTPException(status_code=404, detail="Employee not found.")
+            employee.profile_unlocked = False
+            employee.profile_unlocked_until = None
+            employee.profile_edit_requested = False
+            session.commit()
+            return {"message": f"Profile unlock request denied for employee {employee.full_name or employee_id}."}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Router Error in deny_profile_unlock: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to deny profile unlock.")
 
 @router.post("/employees/lock-profile", tags=["Employees"])
 def lock_profile(current_user: dict = Depends(get_current_user)):

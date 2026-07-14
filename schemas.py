@@ -141,6 +141,7 @@ class ProjectCreate(ConfiguredBaseModel):
     billing_cycle: Optional[str] = "N/A"
     billing_rate: Optional[float] = 0.0
     next_billing_date: Optional[str] = "N/A"
+    content_agreement: Optional[str] = "[]"
 
     model_config = ConfigDict(extra="allow")
 
@@ -168,6 +169,7 @@ class ProjectUpdate(ConfiguredBaseModel):
     billing_cycle: Optional[str] = None
     billing_rate: Optional[float] = None
     next_billing_date: Optional[str] = None
+    content_agreement: Optional[str] = None
     model_config = ConfigDict(extra="allow")
 
 class ProjectExpenseCreate(ConfiguredBaseModel):
@@ -390,6 +392,9 @@ class ContentTaskCreate(ConfiguredBaseModel):
     poster_count: Optional[int] = Field(0, ge=0, description="Cannot be negative")
     calls_made: Optional[int] = Field(0, ge=0, description="Cannot be negative")
     platform: Optional[str] = "N/A"
+    custom_field_values: Optional[str] = "{}"
+    upload_deadline: Optional[str] = "N/A"
+    next_delivery_date: Optional[str] = "N/A"
     
     # Milestone/Task tracking & Categorization additions
     sprint: Optional[str] = "N/A"
@@ -428,6 +433,9 @@ class ContentTaskUpdate(ConfiguredBaseModel):
     poster_count: Optional[int] = Field(None, ge=0)
     calls_made: Optional[int] = Field(None, ge=0)
     platform: Optional[str] = None
+    custom_field_values: Optional[str] = None
+    upload_deadline: Optional[str] = None
+    next_delivery_date: Optional[str] = None
     sprint: Optional[str] = None
     module: Optional[str] = None
     feature: Optional[str] = None

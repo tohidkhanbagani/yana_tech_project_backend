@@ -34,6 +34,7 @@ class Admins(Base):
     email = Column(String, nullable=True, default="N/A")
     full_name = Column(String, nullable=True, default="N/A")
     access_level = Column(String, nullable=True, default="SystemAdmin")
+    current_session_id = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
@@ -48,6 +49,7 @@ class Employees(Base):
     # plain_password = Column(String, nullable=True)
     role_id = Column(String, ForeignKey("departments_roles.id"), nullable=True)
     is_active = Column(Boolean, nullable=True, default=True)
+    current_session_id = Column(String, nullable=True)
     
     # Basic HR & Contact Data
     full_name = Column(String, nullable=True, default="N/A")
@@ -181,6 +183,7 @@ class Projects(Base):
     # Link to active SRS document. 
     # Defined as string to avoid strict circular dependency with SRS_Documents table load order.
     srs_id = Column(String, ForeignKey("srs_documents.id"), nullable=True) 
+    content_agreement = Column(Text, nullable=True, default="[]")
 
     created_at = Column(DateTime, nullable=False, default=datetime.now)
     updated_at = Column(DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
@@ -406,6 +409,10 @@ class ContentCreatorTasks(Base):
     handover_for_employee_id = Column(String, nullable=True)
     handover_source_task_id = Column(String, nullable=True)
 
+    custom_field_values = Column(Text, nullable=True, default="{}")
+    upload_deadline = Column(String, nullable=True, default="N/A")
+    next_delivery_date = Column(String, nullable=True, default="N/A")
+
 
 
 class Attendance(Base):
@@ -469,4 +476,18 @@ class CompanyHoliday(Base):
     date = Column(String, nullable=False)  # Format: YYYY-MM-DD
     holiday_type = Column(String, nullable=False)  # 'Public' or 'Company'
     created_at = Column(DateTime, default=datetime.now)
+
+
+class ProjectBilling(Base):
+    __tablename__ = "project_billings"
+    id = Column(String, primary_key=True, default=generate_uuid)
+    project_id = Column(String, ForeignKey("projects.id"), nullable=False)
+    billing_date = Column(DateTime, nullable=False, default=datetime.now)
+    amount = Column(Float, nullable=False, default=0.0)
+    billing_type = Column(String, nullable=False) # Fixed Price, Monthly Retainer, Internal / Non-Billable
+    description = Column(Text, nullable=True)
+    status = Column(String, nullable=False, default="Billed") # Billed, Paid, Partial, Void
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
 

@@ -895,9 +895,12 @@ def get_v2_dashboard_summary(current_user: dict = Depends(get_current_user)):
                 b_val = float(p.budget) if p.budget and str(p.budget).replace(".","",1).isdigit() else 0.0
                 spent_percent = (t_cost / b_val * 100) if b_val > 0 else 0
 
-                # Dynamically compute project progress from milestones
+                # Dynamically compute project progress
                 m_total, m_done = milestone_stats.get(p.id, (0, 0))
-                if m_total > 0:
+                p_type = (p.project_type or "").strip().lower()
+                if p_type == "content":
+                    computed_progress = p.progress or "0%"
+                elif m_total > 0:
                     computed_progress = f"{int((m_done / m_total) * 100)}%"
                 else:
                     computed_progress = p.progress or "0%"

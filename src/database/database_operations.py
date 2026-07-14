@@ -18,7 +18,7 @@ from .database_tables import (
     Departments_Roles, Admins, Employees, LoginHistory, Managers,
     Projects, SRS_Documents, ProjectTimeline, ProjectAssignments, MilestoneAssignments,
     DeveloperTasks, ContentCreatorTasks, ProjectExpenses, Attendance, LeaveRequest, ProjectPayments,
-    ChecklistTemplate, ProjectChecklistState, AuditLog, InAppNotification, ClientReceivables
+    ChecklistTemplate, ProjectChecklistState, AuditLog, InAppNotification, ClientReceivables, ProjectBilling
 )
 # ==========================================
 #              LOGGING SETUP
@@ -181,6 +181,52 @@ class DatabaseOperations:
                 "critical_error": "An unexpected application error occurred.",
                 "details": str(exception)
             })
+
+    def _calculate_task_financials(self, session, employee_id: str, project_id: str, hours_logged: float, is_handover: bool = False, handover_for_employee_id: str = None) -> tuple[float, float, float]:
+        """
+        Thoroughly calculates employee_cost, billing_amount, and profit_loss for a task entry.
+        Strictly applies custom hourly cost and custom hourly billing overrides from project assignments.
+        """
+        # Determine the target colleague whose rate is being charged (e.g. if handover coverage)
+        check_emp_id = employee_id
+        if is_handover and handover_for_employee_id:
+            check_emp_id = handover_for_employee_id
+
+        employee = session.query(Employees).filter_by(id=check_emp_id).first()
+        if not employee:
+            # Fallback to base employee if covered colleague profile is missing
+            employee = session.query(Employees).filter_by(id=employee_id).first()
+
+        if not employee:
+            return 0.0, 0.0, 0.0
+
+        # Retrieve default rates from employee profile
+        cost_rate = float(employee.hourly_cost_rate or 0.0)
+        billing_rate = float(employee.hourly_billing_rate or 0.0)
+
+        # Check for custom assignment rates if project is specified
+        if project_id:
+            assignment = session.query(ProjectAssignments).filter_by(
+                project_id=project_id,
+                employee_id=check_emp_id
+            ).first()
+            if assignment:
+                if assignment.custom_hourly_cost is not None:
+                    cost_rate = float(assignment.custom_hourly_cost)
+                if assignment.custom_hourly_billing is not None:
+                    billing_rate = float(assignment.custom_hourly_billing)
+
+            # Check if project cost type is non-billable
+            proj_obj = session.query(Projects).filter_by(id=project_id).first()
+            if proj_obj and proj_obj.cost_type == "Internal / Non-Billable":
+                billing_rate = 0.0
+
+        hours = float(hours_logged)
+        emp_cost = hours * cost_rate
+        bill_amt = hours * billing_rate
+        prof_loss = bill_amt - emp_cost
+
+        return emp_cost, bill_amt, prof_loss
 
     # ==========================================
     #              MANAGERS
@@ -498,9 +544,6 @@ class DatabaseOperations:
                 data["date"] = task_date
                     
                 project_id = data.get("project_id")
-                cost_rate = float(employee.hourly_cost_rate or 0.0)
-                billing_rate = float(employee.hourly_billing_rate or 0.0)
-
                 # Intercept logic: If working on a specific project, check for custom whitelist rates
                 if project_id:
                     # If it's a handover task, check assignment for the original colleague
@@ -518,13 +561,21 @@ class DatabaseOperations:
                             return json.dumps({"error": "The colleague you are covering for is not assigned to this project. Access denied."})
                         return json.dumps({"error": "You are not assigned to this project. Access denied."})
 
-                    if assignment.custom_hourly_billing is not None:
-                        billing_rate = float(assignment.custom_hourly_billing)
-
                 hours_logged = float(data.get("hours_logged", 0.0))
-                data["employee_cost"] = hours_logged * cost_rate
-                data["billing_amount"] = hours_logged * billing_rate
-                data["profit_loss"] = data["billing_amount"] - data["employee_cost"]
+                is_handover = bool(data.get("is_handover", False))
+                handover_for_employee_id = data.get("handover_for_employee_id")
+
+                emp_cost, bill_amt, prof_loss = self._calculate_task_financials(
+                    session=session,
+                    employee_id=employee_id,
+                    project_id=project_id,
+                    hours_logged=hours_logged,
+                    is_handover=is_handover,
+                    handover_for_employee_id=handover_for_employee_id
+                )
+                data["employee_cost"] = emp_cost
+                data["billing_amount"] = bill_amt
+                data["profit_loss"] = prof_loss
 
                 # Save Task
                 new_task = DeveloperTasks(**data)
@@ -710,9 +761,6 @@ class DatabaseOperations:
                 data["date"] = task_date
 
                 project_id = data.get("project_id")
-                cost_rate = float(employee.hourly_cost_rate or 0.0)
-                billing_rate = float(employee.hourly_billing_rate or 0.0)
-
                 # Intercept logic: If working on a specific project, check for custom whitelist rates
                 if project_id:
                     # If it's a handover task, check assignment for the original colleague
@@ -730,13 +778,21 @@ class DatabaseOperations:
                             return json.dumps({"error": "The colleague you are covering for is not assigned to this project. Access denied."})
                         return json.dumps({"error": "You are not assigned to this project. Access denied."})
 
-                    if assignment.custom_hourly_billing is not None:
-                        billing_rate = float(assignment.custom_hourly_billing)
-
                 hours_logged = float(data.get("hours_logged", 0.0))
-                data["employee_cost"] = hours_logged * cost_rate
-                data["billing_amount"] = hours_logged * billing_rate
-                data["profit_loss"] = data["billing_amount"] - data["employee_cost"]
+                is_handover = bool(data.get("is_handover", False))
+                handover_for_employee_id = data.get("handover_for_employee_id")
+
+                emp_cost, bill_amt, prof_loss = self._calculate_task_financials(
+                    session=session,
+                    employee_id=employee_id,
+                    project_id=project_id,
+                    hours_logged=hours_logged,
+                    is_handover=is_handover,
+                    handover_for_employee_id=handover_for_employee_id
+                )
+                data["employee_cost"] = emp_cost
+                data["billing_amount"] = bill_amt
+                data["profit_loss"] = prof_loss
 
                 # CONTENT AGGREGATION AUTO-CALCULATION
                 reels = int(data.get("reels_count", 0))
@@ -813,6 +869,12 @@ class DatabaseOperations:
                     if leave_req:
                         leave_req.handover_status = "Completed" if data.get("task_status") == "Completed" else "Pending"
 
+                session.flush()
+                if project_id:
+                    proj = session.query(Projects).filter_by(id=project_id).first()
+                    if proj:
+                        proj.progress = self._calculate_project_progress(session, proj)
+
                 session.commit()
                 session.refresh(new_task)
 
@@ -879,6 +941,7 @@ class DatabaseOperations:
                 session.add(new_project)
                 session.commit()
                 session.refresh(new_project)
+                self.sync_project_billing(session, new_project)
                 return json.dumps(self.model_to_dict(new_project), indent=4, default=str)
             except Exception as e:
                 session.rollback()
@@ -886,36 +949,281 @@ class DatabaseOperations:
 
     def _calculate_project_progress(self, session, proj) -> str:
         """
-        System of Control Fix: Progress is now measured by Work Done (Milestones), 
-        not by Money Spent (Budget).
-        Falls back to manually set database progress if no milestones are defined.
+        Calculates project progress dynamically.
+        - For Content projects: based on custom fields target vs created counts.
+        - For Engineering / Both: based on milestones.
         """
         try:
-            total_milestones = session.query(ProjectTimeline).filter_by(project_id=proj.id).count()
-            if total_milestones == 0:
-                return proj.progress if hasattr(proj, 'progress') and proj.progress else "0%"
-            
-            completed_milestones = session.query(ProjectTimeline).filter(
-                ProjectTimeline.project_id == proj.id,
-                ProjectTimeline.status.ilike("%completed%")
-            ).count()
-            
-            progress_pct = int((completed_milestones / total_milestones) * 100)
-            return f"{progress_pct}%"
+            p_type = (proj.project_type or "").strip().lower()
+            if p_type == "content":
+                import json
+                try:
+                    agreement = json.loads(proj.content_agreement) if proj.content_agreement else []
+                except Exception:
+                    agreement = []
+                
+                if not agreement or not isinstance(agreement, list):
+                    return proj.progress if hasattr(proj, 'progress') and proj.progress else "0%"
+                
+                custom_fields = [f for f in agreement if isinstance(f, dict) and f.get("name") and float(f.get("target", 0)) > 0]
+                if not custom_fields:
+                    return proj.progress if hasattr(proj, 'progress') and proj.progress else "0%"
+                
+                total_target = sum(float(f.get("target", 0)) for f in custom_fields)
+                
+                # Fetch tasks for this content project
+                tasks = session.query(ContentCreatorTasks).filter(ContentCreatorTasks.project_id == proj.id).all()
+                total_logged = 0.0
+                for task in tasks:
+                    try:
+                        logged_vals = json.loads(task.custom_field_values) if task.custom_field_values else {}
+                    except Exception:
+                        logged_vals = {}
+                    if isinstance(logged_vals, dict):
+                        for f in custom_fields:
+                            field_name = f.get("name")
+                            val = logged_vals.get(field_name, 0)
+                            try:
+                                total_logged += float(val)
+                            except (ValueError, TypeError):
+                                pass
+                
+                progress_pct = min(100, int((total_logged / total_target) * 100))
+                return f"{progress_pct}%"
+            else:
+                total_milestones = session.query(ProjectTimeline).filter_by(project_id=proj.id).count()
+                if total_milestones == 0:
+                    return proj.progress if hasattr(proj, 'progress') and proj.progress else "0%"
+                
+                completed_milestones = session.query(ProjectTimeline).filter(
+                    ProjectTimeline.project_id == proj.id,
+                    ProjectTimeline.status.ilike("%completed%")
+                ).count()
+                
+                progress_pct = int((completed_milestones / total_milestones) * 100)
+                return f"{progress_pct}%"
         except Exception:
             return proj.progress if hasattr(proj, 'progress') and proj.progress else "0%"
 
-    def _calculate_payment_stats(self, session, proj) -> dict:
+    def _enrich_project_agreement(self, session, proj_id, content_agreement_str) -> str:
+        import json
+        try:
+            agreement = json.loads(content_agreement_str) if content_agreement_str else []
+        except Exception:
+            agreement = []
+            
+        if not agreement or not isinstance(agreement, list):
+            # Try to reconstruct from logged tasks if empty
+            tasks = session.query(ContentCreatorTasks).filter(ContentCreatorTasks.project_id == proj_id).all()
+            unique_fields = set()
+            for task in tasks:
+                try:
+                    logged_vals = json.loads(task.custom_field_values) if task.custom_field_values else {}
+                    if isinstance(logged_vals, dict):
+                        unique_fields.update(logged_vals.keys())
+                except Exception:
+                    pass
+            if unique_fields:
+                agreement = [{"name": name, "target": 100, "monthly_target": 0} for name in sorted(unique_fields)]
+                # Write back to project row to heal the database!
+                try:
+                    proj = session.query(Projects).filter_by(id=proj_id).first()
+                    if proj:
+                        proj.content_agreement = json.dumps(agreement)
+                        session.commit()
+                except Exception:
+                    pass
+            else:
+                return "[]"
+            
+        # Aggregate the logged custom fields for this project
+        tasks = session.query(ContentCreatorTasks).filter(ContentCreatorTasks.project_id == proj_id).all()
+        totals = {}
+        for task in tasks:
+            try:
+                logged_vals = json.loads(task.custom_field_values) if task.custom_field_values else {}
+            except Exception:
+                logged_vals = {}
+            if isinstance(logged_vals, dict):
+                for k, v in logged_vals.items():
+                    try:
+                        totals[k] = totals.get(k, 0.0) + float(v)
+                    except (ValueError, TypeError):
+                        pass
+                        
+        for item in agreement:
+            if isinstance(item, dict) and "name" in item:
+                name = item["name"]
+                item["current"] = int(totals.get(name, 0.0)) if totals.get(name, 0.0).is_integer() else totals.get(name, 0.0)
+                
+        return json.dumps(agreement)
+
+    def sync_project_billing(self, session, proj) -> None:
+        """
+        Dynamically synchronizes and generates project billing records in the DB
+        based on the active billing/cost type of the project.
+        """
+        try:
+            cost_type = proj.cost_type or "Internal / Non-Billable"
+            
+            # Normalize billing type strings
+            if cost_type not in ["Fixed Price", "Monthly Retainer", "Internal / Non-Billable"]:
+                cost_type = "Internal / Non-Billable"
+
+            # 1. Void or delete all billing records of OTHER billing types
+            other_billings = session.query(ProjectBilling).filter(
+                ProjectBilling.project_id == proj.id,
+                ProjectBilling.billing_type != cost_type
+            ).all()
+            for ob in other_billings:
+                session.delete(ob)
+            session.flush()
+
+            if cost_type == "Fixed Price":
+                # Fixed price has a single billing record for the entire contract value
+                contract_billing = session.query(ProjectBilling).filter_by(
+                    project_id=proj.id,
+                    billing_type="Fixed Price"
+                ).first()
+                
+                amount = float(proj.client_cost or 0.0)
+                if contract_billing:
+                    contract_billing.amount = amount
+                    contract_billing.description = "Fixed Price - Contract Value"
+                else:
+                    new_b = ProjectBilling(
+                        project_id=proj.id,
+                        amount=amount,
+                        billing_type="Fixed Price",
+                        description="Fixed Price - Contract Value",
+                        status="Billed",
+                        billing_date=proj.created_at or datetime.now()
+                    )
+                    session.add(new_b)
+                
+            elif cost_type == "Monthly Retainer":
+                # Monthly Retainer generates recurring bills from start_date to today/end_date
+                start_date = None
+                if proj.start_date and proj.start_date != "N/A":
+                    try:
+                        start_date = datetime.strptime(proj.start_date.strip(), "%Y-%m-%d")
+                    except ValueError:
+                        pass
+                if not start_date:
+                    start_date = proj.created_at or datetime.now()
+
+                # Determine billing end boundary
+                end_boundary = datetime.now()
+                if proj.status in ["Completed", "Cancelled"] and proj.end_date and proj.end_date != "N/A":
+                    try:
+                        end_boundary = datetime.strptime(proj.end_date.strip(), "%Y-%m-%d")
+                    except ValueError:
+                        pass
+                
+                # Monthly increment helper
+                import calendar
+                def add_months(sourcedate, months):
+                    month = sourcedate.month - 1 + months
+                    year = sourcedate.year + month // 12
+                    month = month % 12 + 1
+                    day = min(sourcedate.day, calendar.monthrange(year, month)[1])
+                    return datetime(year, month, day, sourcedate.hour, sourcedate.minute, sourcedate.second)
+
+                # Generate billing dates
+                billing_rate = float(proj.billing_rate or 0.0)
+                i = 0
+                while True:
+                    b_date = add_months(start_date, i)
+                    if b_date > end_boundary:
+                        break
+                    
+                    # Check if billing for this month already exists
+                    month_start = datetime(b_date.year, b_date.month, 1)
+                    if b_date.month == 12:
+                        month_end = datetime(b_date.year + 1, 1, 1)
+                    else:
+                        month_end = datetime(b_date.year, b_date.month + 1, 1)
+
+                    existing = session.query(ProjectBilling).filter(
+                        ProjectBilling.project_id == proj.id,
+                        ProjectBilling.billing_type == "Monthly Retainer",
+                        ProjectBilling.billing_date >= month_start,
+                        ProjectBilling.billing_date < month_end
+                    ).first()
+
+                    description = f"Monthly Retainer - {b_date.strftime('%B %Y')}"
+                    if existing:
+                        existing.amount = billing_rate
+                        existing.description = description
+                    else:
+                        new_mb = ProjectBilling(
+                            project_id=proj.id,
+                            amount=billing_rate,
+                            billing_type="Monthly Retainer",
+                            description=description,
+                            status="Billed",
+                            billing_date=b_date
+                        )
+                        session.add(new_mb)
+                    i += 1
+
+            elif cost_type == "Internal / Non-Billable":
+                pass
+
+            # Intercept: update task billing amounts dynamically based on billing type
+            dev_tasks = session.query(DeveloperTasks).filter_by(project_id=proj.id).all()
+            for dt in dev_tasks:
+                emp_cost, bill_amt, prof_loss = self._calculate_task_financials(
+                    session=session,
+                    employee_id=dt.employee_id,
+                    project_id=proj.id,
+                    hours_logged=dt.hours_logged,
+                    is_handover=bool(dt.is_handover),
+                    handover_for_employee_id=dt.handover_for_employee_id
+                )
+                dt.employee_cost = emp_cost
+                dt.billing_amount = bill_amt
+                dt.profit_loss = prof_loss
+
+            con_tasks = session.query(ContentCreatorTasks).filter_by(project_id=proj.id).all()
+            for ct in con_tasks:
+                emp_cost, bill_amt, prof_loss = self._calculate_task_financials(
+                    session=session,
+                    employee_id=ct.employee_id,
+                    project_id=proj.id,
+                    hours_logged=ct.hours_logged,
+                    is_handover=bool(ct.is_handover),
+                    handover_for_employee_id=ct.handover_for_employee_id
+                )
+                ct.employee_cost = emp_cost
+                ct.billing_amount = bill_amt
+                ct.profit_loss = prof_loss
+
+            session.commit()
+        except Exception as e:
+            logger.error(f"Error in sync_project_billing: {str(e)}", exc_info=True)
+
+    def _calculate_payment_stats(self, session, proj, sync: bool = True) -> dict:
         """
         Computes the financial state of a project on the fly.
         """
         try:
+            if sync:
+                self.sync_project_billing(session, proj)
+
+            # Sum active billing records
+            total_billed = session.query(func.sum(ProjectBilling.amount)).filter(
+                ProjectBilling.project_id == proj.id,
+                ProjectBilling.status != "Void"
+            ).scalar() or 0.0
+
+            # Sum payments
             payments = session.query(ProjectPayments).filter_by(project_id=proj.id).all()
             total_paid = sum(p.amount for p in payments)
-            client_cost = float(proj.client_cost or 0.0)
-            pending_amount = max(0.0, client_cost - total_paid)
             
-            if total_paid >= client_cost and client_cost > 0:
+            pending_amount = max(0.0, total_billed - total_paid)
+            
+            if total_paid >= total_billed and total_billed > 0:
                 payment_status = "Paid in Full"
             elif total_paid > 0:
                 payment_status = "Partial"
@@ -923,11 +1231,13 @@ class DatabaseOperations:
                 payment_status = "Unpaid"
                 
             return {
+                "client_cost": total_billed,
                 "total_paid": total_paid,
                 "pending_amount": pending_amount,
                 "payment_status": payment_status
             }
-        except Exception:
+        except Exception as e:
+            logger.error(f"Error in _calculate_payment_stats: {str(e)}", exc_info=True)
             return {
                 "total_paid": 0.0,
                 "pending_amount": float(proj.client_cost or 0.0),
@@ -982,19 +1292,16 @@ class DatabaseOperations:
                     
                     # Progress calculation
                     p_dict['progress'] = proj.progress if proj.progress else "0%"
+                    p_dict['content_agreement'] = self._enrich_project_agreement(session, proj.id, proj.content_agreement)
                         
                     # Payment calculation
-                    client_cost = float(proj.client_cost or 0.0)
-                    total_paid = float(total_paid or 0.0)
-                    pending_amount = max(0.0, client_cost - total_paid)
+                    pay_stats = self._calculate_payment_stats(session, proj, sync=False)
+                    client_cost = pay_stats["client_cost"]
+                    total_paid = pay_stats["total_paid"]
+                    pending_amount = pay_stats["pending_amount"]
+                    payment_status = pay_stats["payment_status"]
                     
-                    if total_paid >= client_cost and client_cost > 0:
-                        payment_status = "Paid in Full"
-                    elif total_paid > 0:
-                        payment_status = "Partial"
-                    else:
-                        payment_status = "Unpaid"
-                        
+                    p_dict['client_cost'] = client_cost
                     p_dict['total_paid'] = total_paid
                     p_dict['pending_amount'] = pending_amount
                     p_dict['payment_status'] = payment_status
@@ -1427,6 +1734,7 @@ class DatabaseOperations:
                         
                     p_dict['is_at_risk'] = is_at_risk
                     p_dict['risk_reasons'] = risk_reasons
+                    p_dict['content_agreement'] = self._enrich_project_agreement(session, proj.id, proj.content_agreement)
                     res_list.append(p_dict)
                     
                 return json.dumps(res_list, indent=4, default=str)
@@ -1525,21 +1833,91 @@ class DatabaseOperations:
                 return self._handle_error("get_employee", e)
 
     def delete_employee(self, employee_id: str) -> str:
+        if employee_id == 'deleted-employee':
+            return json.dumps({"error": "Cannot delete the system placeholder employee record."})
+
         with self.SessionLocal() as session:
             try:
                 emp = session.query(Employees).filter_by(id=employee_id).first()
                 if not emp:
                     return json.dumps({"error": "Employee not found"})
 
-                # --- CLEANUP: Delete the employee's upload folder from disk ---
+                original_name = emp.full_name or emp.username or "Unknown Employee"
+                prefix = f"[Deleted Employee: {original_name}] "
+
+                # Ensure placeholder employee exists
+                placeholder = session.query(Employees).filter_by(id='deleted-employee').first()
+                if not placeholder:
+                    placeholder = Employees(
+                        id='deleted-employee',
+                        username='deleted_employee',
+                        full_name='Deleted Employee',
+                        is_active=False
+                    )
+                    session.add(placeholder)
+                    session.flush()
+
+                # 1. Reassociate DeveloperTasks timesheets
+                dev_tasks = session.query(DeveloperTasks).filter_by(employee_id=employee_id).all()
+                for task in dev_tasks:
+                    task.employee_id = 'deleted-employee'
+                    current_desc = task.task_performed or ""
+                    if not current_desc.startswith("[Deleted Employee:"):
+                        task.task_performed = f"{prefix}{current_desc}"
+
+                # Update handover_for_employee_id references in DeveloperTasks
+                handover_dev = session.query(DeveloperTasks).filter_by(handover_for_employee_id=employee_id).all()
+                for task in handover_dev:
+                    task.handover_for_employee_id = 'deleted-employee'
+
+                # 2. Reassociate ContentCreatorTasks timesheets
+                cc_tasks = session.query(ContentCreatorTasks).filter_by(employee_id=employee_id).all()
+                for task in cc_tasks:
+                    task.employee_id = 'deleted-employee'
+                    current_desc = task.task_performed or ""
+                    if not current_desc.startswith("[Deleted Employee:"):
+                        task.task_performed = f"{prefix}{current_desc}"
+
+                # Update handover_for_employee_id references in ContentCreatorTasks
+                handover_cc = session.query(ContentCreatorTasks).filter_by(handover_for_employee_id=employee_id).all()
+                for task in handover_cc:
+                    task.handover_for_employee_id = 'deleted-employee'
+
+                # 3. Reassociate Attendance history
+                attendances = session.query(Attendance).filter_by(employee_id=employee_id).all()
+                for att in attendances:
+                    att.employee_id = 'deleted-employee'
+                    current_notes = att.notes or ""
+                    if not current_notes.startswith("[Deleted Employee:"):
+                        att.notes = f"{prefix}{current_notes}".strip()
+
+                # 4. Reassociate LeaveRequest logs
+                leave_requests = session.query(LeaveRequest).filter_by(employee_id=employee_id).all()
+                for lr in leave_requests:
+                    lr.employee_id = 'deleted-employee'
+                    current_reason = lr.reason or ""
+                    if not current_reason.startswith("[Deleted Employee:"):
+                        lr.reason = f"{prefix}{current_reason}".strip()
+
+                # Update backup_employee_id references in LeaveRequests
+                backups = session.query(LeaveRequest).filter_by(backup_employee_id=employee_id).all()
+                for lr in backups:
+                    lr.backup_employee_id = 'N/A'
+
+                # 5. Delete ProjectAssignments and MilestoneAssignments
+                session.query(ProjectAssignments).filter_by(employee_id=employee_id).delete()
+                session.query(MilestoneAssignments).filter_by(employee_id=employee_id).delete()
+
+                # 6. Delete local upload folder
                 upload_folder = os.path.join("data", "uploads", "employees", employee_id)
                 if os.path.isdir(upload_folder):
                     shutil.rmtree(upload_folder)
                     logger.info(f"Deleted employee upload folder: {upload_folder}")
 
+                # 7. Delete employee record from DB
                 session.delete(emp)
                 session.commit()
-                return json.dumps({"message": "Employee and all associated documents deleted successfully"})
+                return json.dumps({"message": "Employee deleted and data reassigned/cleaned up successfully"})
             except Exception as e:
                 session.rollback()
                 return self._handle_error("delete_employee", e)
@@ -1566,6 +1944,7 @@ class DatabaseOperations:
                 
                 p_dict['assigned_employees'] = assigned_employees
                 p_dict['progress'] = proj.progress if proj.progress else "0%"
+                p_dict['content_agreement'] = self._enrich_project_agreement(session, proj.id, proj.content_agreement)
                 
                 # Compute Payment Stats
                 pay_stats = self._calculate_payment_stats(session, proj)
@@ -2170,9 +2549,17 @@ class DatabaseOperations:
                 for key, value in data.items():
                     if hasattr(proj, key):
                         setattr(proj, key, value)
+                session.flush()
+                # Recalculate progress
+                proj.progress = self._calculate_project_progress(session, proj)
                 session.commit()
                 session.refresh(proj)
-                return json.dumps(self.model_to_dict(proj), indent=4, default=str)
+                self.sync_project_billing(session, proj)
+                
+                # Enrich content agreement for returned dict
+                p_dict = self.model_to_dict(proj)
+                p_dict['content_agreement'] = self._enrich_project_agreement(session, proj.id, proj.content_agreement)
+                return json.dumps(p_dict, indent=4, default=str)
             except Exception as e:
                 session.rollback()
                 return self._handle_error("edit_project", e, context={"project_id": project_id})
@@ -2275,7 +2662,16 @@ class DatabaseOperations:
                 if not task:
                     return json.dumps({"error": "Task not found"})
                     
+                project_id = task.project_id
                 session.delete(task)
+                session.flush()
+                
+                # Auto-update project progress
+                if project_id:
+                    proj = session.query(Projects).filter_by(id=project_id).first()
+                    if proj:
+                        proj.progress = self._calculate_project_progress(session, proj)
+
                 session.commit()
                 return json.dumps({"message": "Task deleted successfully"})
             except Exception as e:
@@ -2475,36 +2871,42 @@ class DatabaseOperations:
                 for key, value in data.items():
                     setattr(task, key, value)
                 
-                # RE-CALCULATE FINANCIALS IF HOURS ARE EDITED
-                if 'hours_logged' in data:
-                    # check 24 hrs daily limit
-                    task_cal_date = task.date.date()
-                    start_of_day = datetime.combine(task_cal_date, datetime.min.time())
-                    end_of_day = datetime.combine(task_cal_date, datetime.max.time())
-                    
-                    dev_hours_today = session.query(func.sum(DeveloperTasks.hours_logged)).filter(
-                        DeveloperTasks.employee_id == task.employee_id,
-                        DeveloperTasks.id != task.id,
-                        DeveloperTasks.date.between(start_of_day, end_of_day)
-                    ).scalar() or 0.0
-                    
-                    content_hours_today = session.query(func.sum(ContentCreatorTasks.hours_logged)).filter(
-                        ContentCreatorTasks.employee_id == task.employee_id,
-                        ContentCreatorTasks.date.between(start_of_day, end_of_day)
-                    ).scalar() or 0.0
-                    
-                    existing_hours_today = float(dev_hours_today) + float(content_hours_today)
-                    new_hours = float(data['hours_logged'])
-                    if existing_hours_today + new_hours > 24.0:
-                        return json.dumps({"error": f"Daily limit exceeded: You have already logged {existing_hours_today} hours on this date. Setting this task to {new_hours} hours would exceed the 24 hours daily limit."})
+                # RE-CALCULATE FINANCIALS IF RELATED FIELDS ARE EDITED
+                financial_trigger_fields = {'hours_logged', 'project_id', 'employee_id', 'is_handover', 'handover_for_employee_id'}
+                if any(field in data for field in financial_trigger_fields):
+                    if 'hours_logged' in data or 'employee_id' in data:
+                        # check 24 hrs daily limit
+                        task_cal_date = task.date.date()
+                        start_of_day = datetime.combine(task_cal_date, datetime.min.time())
+                        end_of_day = datetime.combine(task_cal_date, datetime.max.time())
+                        
+                        dev_hours_today = session.query(func.sum(DeveloperTasks.hours_logged)).filter(
+                            DeveloperTasks.employee_id == task.employee_id,
+                            DeveloperTasks.id != task.id,
+                            DeveloperTasks.date.between(start_of_day, end_of_day)
+                        ).scalar() or 0.0
+                        
+                        content_hours_today = session.query(func.sum(ContentCreatorTasks.hours_logged)).filter(
+                            ContentCreatorTasks.employee_id == task.employee_id,
+                            ContentCreatorTasks.date.between(start_of_day, end_of_day)
+                        ).scalar() or 0.0
+                        
+                        existing_hours_today = float(dev_hours_today) + float(content_hours_today)
+                        new_hours = float(task.hours_logged)
+                        if existing_hours_today + new_hours > 24.0:
+                            return json.dumps({"error": f"Daily limit exceeded: You have already logged {existing_hours_today} hours on this date. Setting this task to {new_hours} hours would exceed the 24 hours daily limit."})
 
-                    employee = session.query(Employees).filter_by(id=task.employee_id).first()
-                    if employee:
-                        cost_rate = float(employee.hourly_cost_rate or 0.0)
-                        billing_rate = float(employee.hourly_billing_rate or 0.0)
-                        task.employee_cost = float(task.hours_logged) * cost_rate
-                        task.billing_amount = float(task.hours_logged) * billing_rate
-                        task.profit_loss = task.billing_amount - task.employee_cost
+                    emp_cost, bill_amt, prof_loss = self._calculate_task_financials(
+                        session=session,
+                        employee_id=task.employee_id,
+                        project_id=task.project_id,
+                        hours_logged=task.hours_logged,
+                        is_handover=bool(task.is_handover),
+                        handover_for_employee_id=task.handover_for_employee_id
+                    )
+                    task.employee_cost = emp_cost
+                    task.billing_amount = bill_amt
+                    task.profit_loss = prof_loss
 
                 session.commit()
                 session.refresh(task)
@@ -2525,40 +2927,53 @@ class DatabaseOperations:
                 for key, value in data.items():
                     setattr(task, key, value)
                 
-                # RE-CALCULATE FINANCIALS IF HOURS ARE EDITED
-                if 'hours_logged' in data:
-                    # check 24 hrs daily limit
-                    task_cal_date = task.date.date()
-                    start_of_day = datetime.combine(task_cal_date, datetime.min.time())
-                    end_of_day = datetime.combine(task_cal_date, datetime.max.time())
-                    
-                    dev_hours_today = session.query(func.sum(DeveloperTasks.hours_logged)).filter(
-                        DeveloperTasks.employee_id == task.employee_id,
-                        DeveloperTasks.date.between(start_of_day, end_of_day)
-                    ).scalar() or 0.0
-                    
-                    content_hours_today = session.query(func.sum(ContentCreatorTasks.hours_logged)).filter(
-                        ContentCreatorTasks.employee_id == task.employee_id,
-                        ContentCreatorTasks.id != task.id,
-                        ContentCreatorTasks.date.between(start_of_day, end_of_day)
-                    ).scalar() or 0.0
-                    
-                    existing_hours_today = float(dev_hours_today) + float(content_hours_today)
-                    new_hours = float(data['hours_logged'])
-                    if existing_hours_today + new_hours > 24.0:
-                        return json.dumps({"error": f"Daily limit exceeded: You have already logged {existing_hours_today} hours on this date. Setting this task to {new_hours} hours would exceed the 24 hours daily limit."})
+                # RE-CALCULATE FINANCIALS IF RELATED FIELDS ARE EDITED
+                financial_trigger_fields = {'hours_logged', 'project_id', 'employee_id', 'is_handover', 'handover_for_employee_id'}
+                if any(field in data for field in financial_trigger_fields):
+                    if 'hours_logged' in data or 'employee_id' in data:
+                        # check 24 hrs daily limit
+                        task_cal_date = task.date.date()
+                        start_of_day = datetime.combine(task_cal_date, datetime.min.time())
+                        end_of_day = datetime.combine(task_cal_date, datetime.max.time())
+                        
+                        dev_hours_today = session.query(func.sum(DeveloperTasks.hours_logged)).filter(
+                            DeveloperTasks.employee_id == task.employee_id,
+                            DeveloperTasks.date.between(start_of_day, end_of_day)
+                        ).scalar() or 0.0
+                        
+                        content_hours_today = session.query(func.sum(ContentCreatorTasks.hours_logged)).filter(
+                            ContentCreatorTasks.employee_id == task.employee_id,
+                            ContentCreatorTasks.id != task.id,
+                            ContentCreatorTasks.date.between(start_of_day, end_of_day)
+                        ).scalar() or 0.0
+                        
+                        existing_hours_today = float(dev_hours_today) + float(content_hours_today)
+                        new_hours = float(task.hours_logged)
+                        if existing_hours_today + new_hours > 24.0:
+                            return json.dumps({"error": f"Daily limit exceeded: You have already logged {existing_hours_today} hours on this date. Setting this task to {new_hours} hours would exceed the 24 hours daily limit."})
 
-                    employee = session.query(Employees).filter_by(id=task.employee_id).first()
-                    if employee:
-                        cost_rate = float(employee.hourly_cost_rate or 0.0)
-                        billing_rate = float(employee.hourly_billing_rate or 0.0)
-                        task.employee_cost = float(task.hours_logged) * cost_rate
-                        task.billing_amount = float(task.hours_logged) * billing_rate
-                        task.profit_loss = task.billing_amount - task.employee_cost
+                    emp_cost, bill_amt, prof_loss = self._calculate_task_financials(
+                        session=session,
+                        employee_id=task.employee_id,
+                        project_id=task.project_id,
+                        hours_logged=task.hours_logged,
+                        is_handover=bool(task.is_handover),
+                        handover_for_employee_id=task.handover_for_employee_id
+                    )
+                    task.employee_cost = emp_cost
+                    task.billing_amount = bill_amt
+                    task.profit_loss = prof_loss
 
                 # RE-CALCULATE TOTAL CONTENT IF COUNTS ARE EDITED
                 if any(k in data for k in ['reels_count', 'long_video_count', 'poster_count']):
                     task.total_content = (task.reels_count or 0) + (task.long_video_count or 0) + (task.poster_count or 0)
+
+                session.flush()
+                # Auto-update project progress
+                if task.project_id:
+                    proj = session.query(Projects).filter_by(id=task.project_id).first()
+                    if proj:
+                        proj.progress = self._calculate_project_progress(session, proj)
 
                 session.commit()
                 session.refresh(task)
