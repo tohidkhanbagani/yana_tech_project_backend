@@ -170,17 +170,17 @@ async def add_security_headers(request: Request, call_next):
     response.headers["Content-Security-Policy"] = "upgrade-insecure-requests"
     return response
 
-@app.middleware("http")
-async def broadcast_middleware(request: Request, call_next):
-    response = await call_next(request)
-    if request.method in ["POST", "PUT", "DELETE", "PATCH"]:
-        if response.status_code >= 200 and response.status_code < 300:
-            # We don't want to broadcast on login or file uploads generally, but doing it globally is safe enough for a small app.
-            # Skip for login to prevent unnecessary broadcasts
-            if "/auth/login" not in request.url.path:
-                import asyncio
-                asyncio.create_task(manager.broadcast({"action": "REFRESH_WORKSPACE"}))
-    return response
+# @app.middleware("http")
+# async def broadcast_middleware(request: Request, call_next):
+#     response = await call_next(request)
+#     if request.method in ["POST", "PUT", "DELETE", "PATCH"]:
+#         if response.status_code >= 200 and response.status_code < 300:
+#             # We don't want to broadcast on login or file uploads generally, but doing it globally is safe enough for a small app.
+#             # Skip for login to prevent unnecessary broadcasts
+#             if "/auth/login" not in request.url.path:
+#                 import asyncio
+#                 asyncio.create_task(manager.broadcast({"action": "REFRESH_WORKSPACE"}))
+#     return response
 
 # @app.middleware("http")
 # async def db_connection_cleanup_middleware(request: Request, call_next):
