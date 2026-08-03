@@ -1,7 +1,9 @@
 # Initialize environment and auto-generate SECRET_KEY if missing
 import os
+import asyncio
 import secrets
 from pathlib import Path
+# pyrefly: ignore [missing-import]
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -45,7 +47,7 @@ from fastapi import Request
 from sqlalchemy import text
 
 # Endpoints mapping
-from src.endpoints import auth, employees, projects, tasks, uploads, dashboard, attendance, websockets, clients, checklists
+from src.endpoints import auth, employees, projects, tasks, uploads, dashboard, attendance, websockets, clients, checklists, audit
 
 # Database mapping for Seeding
 from src.database.database_create import SessionLocal, engine
@@ -87,6 +89,36 @@ async def lifespan(app: FastAPI):
             logger.info("SYSTEM STARTUP MIGRATION: Added current_session_id column to employees table.")
         except Exception:
             pass
+        try:
+            conn.execute(text("ALTER TABLE projects ADD COLUMN billing_interval_days INTEGER DEFAULT 30"))
+            conn.commit()
+            logger.info("SYSTEM STARTUP MIGRATION: Added billing_interval_days column to projects table.")
+        except Exception:
+            pass
+        try:
+            conn.execute(text("ALTER TABLE attendance ADD COLUMN checkout_ip_address VARCHAR"))
+            conn.commit()
+            logger.info("SYSTEM STARTUP MIGRATION: Added checkout_ip_address column to attendance table.")
+        except Exception:
+            pass
+        try:
+            conn.execute(text("ALTER TABLE attendance ADD COLUMN device_info VARCHAR"))
+            conn.commit()
+            logger.info("SYSTEM STARTUP MIGRATION: Added device_info column to attendance table.")
+        except Exception:
+            pass
+        try:
+            conn.execute(text("ALTER TABLE attendance ADD COLUMN checkout_device_info VARCHAR"))
+            conn.commit()
+            logger.info("SYSTEM STARTUP MIGRATION: Added checkout_device_info column to attendance table.")
+        except Exception:
+            pass
+        try:
+            conn.execute(text("ALTER TABLE attendance ADD COLUMN work_mode VARCHAR DEFAULT 'Office'"))
+            conn.commit()
+            logger.info("SYSTEM STARTUP MIGRATION: Added work_mode column to attendance table.")
+        except Exception:
+            pass
 
     with SessionLocal() as session:
         try:
@@ -107,8 +139,24 @@ async def lifespan(app: FastAPI):
                 logger.info(f"System Check: Database contains {admin_count} Administrator(s). Ready.")
         except Exception as e:
             logger.error(f"Failed to run initialization checks: {str(e)}", exc_info=True)
+
+    async def _scheduled_billing_worker():
+        while True:
+            try:
+                await asyncio.sleep(30)
+                with SessionLocal() as session:
+                    from src.billing.billing_engine import BillingEngine
+                    BillingEngine.evaluate_scheduled_project_billings(session)
+            except asyncio.CancelledError:
+                break
+            except Exception as bg_err:
+                logger.error(f"Error in background scheduled billing worker: {str(bg_err)}")
+
+    billing_task = asyncio.create_task(_scheduled_billing_worker())
             
     yield # App is running
+
+    billing_task.cancel()
     
     # --- TEARDOWN / SHUTDOWN LOGIC ---
     logger.info("Shutting down application. Disposing database connection pool...")
@@ -157,7 +205,9 @@ app.include_router(attendance.router)
 app.include_router(clients.router)
 app.include_router(websockets.router)
 app.include_router(checklists.router)
-
+app.include_router(audit.router)
+from src.endpoints import obligations
+app.include_router(obligations.router)
 
 
 @app.middleware("http")

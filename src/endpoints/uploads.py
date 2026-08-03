@@ -338,8 +338,8 @@ async def upload_srs_document(
     3. Creates specific directory pattern.
     4. Parses the PDF into searchable text.
     """
-    if current_user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Only Admins can manage SRS documents.")
+    if current_user.get("role") not in ["admin", "manager"]:
+        raise HTTPException(status_code=403, detail="Only Admins and Managers can manage SRS documents.")
 
     if not file and not cloud_link and not srs_text:
         raise HTTPException(status_code=400, detail="Must provide either a PDF file, a direct Cloud Link, or pasted SRS text.")

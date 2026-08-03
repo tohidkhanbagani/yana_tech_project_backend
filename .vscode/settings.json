@@ -8,5 +8,14 @@
         "**/*.sqlite",
         "**/*.db-journal",
         "**/__pycache__/**"
-    ]
+    ],
+    
+    "timeline.excludeSources": [],
+    "files.watcherExclude": 
+    {
+    "**/.git/objects/**": false,
+    "**/.git/subtree-cache/**": false
+    },
+  
+  "files.maxMemoryForLargeFilesMB": 1024
 }

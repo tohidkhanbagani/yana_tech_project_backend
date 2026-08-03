@@ -1301,6 +1301,7 @@ def get_manager_summary(current_user: dict = Depends(get_current_user)):
                         "employee_name": full_name,
                         "date": a.date.isoformat() if a.date else None,
                         "status": a.status,
+                        "work_mode": a.work_mode,
                         "check_in": a.check_in_time.isoformat() if a.check_in_time else None,
                         "check_out": a.check_out_time.isoformat() if a.check_out_time else None,
                         "shift_start": shift_start or "09:00",

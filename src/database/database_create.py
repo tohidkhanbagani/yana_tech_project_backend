@@ -49,7 +49,7 @@ if DATABASE_URL:
         # Clean pgbouncer parameters since psycopg2/libpq does not support them
         DATABASE_URL = DATABASE_URL.replace("?pgbouncer=true", "").replace("&pgbouncer=true", "")
 
-        # Auto-correct Supabase pooler URLs using port 5432 (Session Mode) to use port 6543 (Transaction Mode).
+        # Auto-correct Supabase Pooler session mode URL to transaction mode (port 6543) for IPv4 compatibility.
         # Session Mode has a strict limit of 15 connections (causing EMAXCONNSESSION), and the direct
         # database host (db.[project-ref].supabase.co) is IPv6-only (unreachable on Render's IPv4 network).
         # Rewriting to port 6543 (Transaction Mode) resolves both reachability and connection limits.
@@ -57,16 +57,23 @@ if DATABASE_URL:
             DATABASE_URL = DATABASE_URL.replace("pooler.supabase.com:5432", "pooler.supabase.com:6543")
             print("Auto-correcting Supabase Pooler session mode URL to transaction mode (port 6543) for IPv4 compatibility.")
             
+        from sqlalchemy.pool import NullPool
+        use_null_pool = "6543" in DATABASE_URL or "pgbouncer" in DATABASE_URL
+        
         # Create engine for cloud Postgres database (no check_same_thread)
         engine = create_engine(
             DATABASE_URL,
             future=True,
             echo=False,
-            pool_size=20,
-            max_overflow=10,
-            pool_timeout=15,
-            pool_recycle=600,
-            pool_pre_ping=True
+            **(
+                {"poolclass": NullPool} if use_null_pool else {
+                    "pool_size": 20,
+                    "max_overflow": 10,
+                    "pool_timeout": 15,
+                    "pool_recycle": 600,
+                    "pool_pre_ping": True
+                }
+            )
         )
 else:
     # Local SQLite Fallback
@@ -82,6 +89,17 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 def init_db():
     print("initializing database.....")
     Base.metadata.create_all(bind=engine)
+    try:
+        from sqlalchemy import inspect, text
+        inspector = inspect(engine)
+        columns = [c['name'] for c in inspector.get_columns('projects')]
+        if 'next_billing_time' not in columns:
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE projects ADD COLUMN next_billing_time VARCHAR DEFAULT '09:00'"))
+                conn.commit()
+            print("Added next_billing_time column to projects table successfully.")
+    except Exception as e:
+        print(f"Migration notice: {e}")
     print("database initialized successfully")
 
 if __name__ == "__main__":

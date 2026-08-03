@@ -95,7 +95,19 @@ class EmployeeUpdate(ConfiguredBaseModel):
     profile_edit_requested: Optional[bool] = None
     profile_unlocked: Optional[bool] = None
 
-    model_config = ConfigDict(extra="allow", from_attributes=True) 
+    model_config = ConfigDict(extra="allow", from_attributes=True)
+
+class LeaveQuotaUpdate(ConfiguredBaseModel):
+    total_paid_leaves: Optional[float] = Field(None, ge=0.0)
+    used_paid_leaves: Optional[float] = Field(None, ge=0.0)
+    total_casual_leaves: Optional[float] = Field(None, ge=0.0)
+    used_casual_leaves: Optional[float] = Field(None, ge=0.0)
+    total_sick_leaves: Optional[float] = Field(None, ge=0.0)
+    used_sick_leaves: Optional[float] = Field(None, ge=0.0)
+
+    model_config = ConfigDict(extra="allow", from_attributes=True)
+
+ 
 
 class ManagerCreate(ConfiguredBaseModel):
     name: str = Field(..., min_length=2, description="Manager Name")
@@ -126,21 +138,19 @@ class ProjectCreate(ConfiguredBaseModel):
     client_cost: Optional[float] = Field(0.0, ge=0.0)
     budget: Optional[float] = Field(0.0, ge=0.0)
     approx_cost: Optional[float] = Field(0.0, ge=0.0)
-    cost_type: Optional[str] = Field("N/A", description="Billing/Cost Type (e.g. Fixed Price, Hourly)")
+    cost_type: Optional[str] = Field("N/A", description="Billing/Cost Type (e.g. Fixed Price, Time & Material, Internal / Non-Billable)")
     start_date: Optional[str] = "N/A"
     end_date: Optional[str] = "N/A"
     progress: Optional[str] = "0%"
     manager: Optional[str] = "N/A"
     client: Optional[str] = "N/A"
-    referred_by: Optional[str] = "N/A"
-    filled_by: Optional[str] = "N/A"
-    assigned_to: Optional[str] = "N/A"
-    team: Optional[str] = "N/A"
     srs_id: Optional[str] = Field(None, description="UUID of the linked SRS Document")
     tech_stack: Optional[str] = Field("N/A", description="Pre-defined tech stack tags")
     billing_cycle: Optional[str] = "N/A"
     billing_rate: Optional[float] = 0.0
     next_billing_date: Optional[str] = "N/A"
+    next_billing_time: Optional[str] = "09:00"
+    billing_interval_days: Optional[int] = 30
     content_agreement: Optional[str] = "[]"
 
     model_config = ConfigDict(extra="allow")
@@ -160,15 +170,13 @@ class ProjectUpdate(ConfiguredBaseModel):
     progress: Optional[str] = None
     manager: Optional[str] = None
     client: Optional[str] = None
-    referred_by: Optional[str] = None
-    filled_by: Optional[str] = None
-    assigned_to: Optional[str] = None
-    team: Optional[str] = None
     srs_id: Optional[str] = None
     tech_stack: Optional[str] = None
     billing_cycle: Optional[str] = None
     billing_rate: Optional[float] = None
     next_billing_date: Optional[str] = None
+    next_billing_time: Optional[str] = None
+    billing_interval_days: Optional[int] = None
     content_agreement: Optional[str] = None
     model_config = ConfigDict(extra="allow")
 
@@ -319,8 +327,11 @@ class DeveloperTaskCreate(ConfiguredBaseModel):
         return v
 
 class DeveloperTaskUpdate(ConfiguredBaseModel):
+    project_id: Optional[str] = None
+    milestone_id: Optional[str] = None
     hours_logged: Optional[float] = Field(None, gt=0.0, le=24.0)
     tech_stack: Optional[str] = None
+
     github_link: Optional[str] = None
     github_pr_created: Optional[str] = None
     github_branch_name: Optional[str] = None
@@ -426,8 +437,11 @@ class ContentTaskCreate(ConfiguredBaseModel):
         return v
 
 class ContentTaskUpdate(ConfiguredBaseModel):
+    project_id: Optional[str] = None
+    milestone_id: Optional[str] = None
     hours_logged: Optional[float] = Field(None, gt=0.0, le=24.0)
     task_performed: Optional[str] = None
+
     reels_count: Optional[int] = Field(None, ge=0)
     long_video_count: Optional[int] = Field(None, ge=0)
     poster_count: Optional[int] = Field(None, ge=0)

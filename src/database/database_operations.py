@@ -5,7 +5,7 @@ import glob
 import uuid as _uuid
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
 
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError, NoResultFound
@@ -18,8 +18,10 @@ from .database_tables import (
     Departments_Roles, Admins, Employees, LoginHistory, Managers,
     Projects, SRS_Documents, ProjectTimeline, ProjectAssignments, MilestoneAssignments,
     DeveloperTasks, ContentCreatorTasks, ProjectExpenses, Attendance, LeaveRequest, ProjectPayments,
-    ChecklistTemplate, ProjectChecklistState, AuditLog, InAppNotification, ClientReceivables, ProjectBilling
+    ChecklistTemplate, ProjectChecklistState, AuditLog, InAppNotification, ClientReceivables, ProjectBilling,
+    OperationalObligation, ObligationCompletionLog
 )
+from src.billing.billing_engine import BillingEngine
 # ==========================================
 #              LOGGING SETUP
 # ==========================================
@@ -81,6 +83,80 @@ class DatabaseOperations:
             except Exception as e:
                 session.rollback()
                 return self._handle_error("write_audit_log", e)
+
+    def get_audit_logs(
+        self,
+        page: int = 1,
+        limit: int = 50,
+        search: Optional[str] = None,
+        action: Optional[str] = None,
+        user_id: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None
+    ) -> dict:
+        """Retrieves paginated audit log entries with optional filters."""
+        with self.SessionLocal() as session:
+            try:
+                query = session.query(AuditLog)
+
+                if action and action.strip():
+                    from sqlalchemy import func
+                    # Normalize both input and database value: replace spaces/dashes with underscores and lowercase
+                    norm_val = action.strip().lower().replace(" ", "_").replace("-", "_")
+                    query = query.filter(func.lower(func.replace(func.replace(AuditLog.action, ' ', '_'), '-', '_')) == norm_val)
+                if user_id and user_id.strip():
+                    query = query.filter(AuditLog.user_id.ilike(f"%{user_id.strip()}%"))
+                if search and search.strip():
+                    search_pattern = f"%{search.strip()}%"
+                    query = query.filter(
+                        (AuditLog.user_id.ilike(search_pattern)) |
+                        (AuditLog.action.ilike(search_pattern)) |
+                        (AuditLog.target_id.ilike(search_pattern)) |
+                        (AuditLog.details.ilike(search_pattern))
+                    )
+                if start_date:
+                    dt_start = self._parse_datetime(start_date)
+                    if dt_start:
+                        query = query.filter(AuditLog.timestamp >= dt_start)
+                if end_date:
+                    dt_end = self._parse_datetime(end_date)
+                    if dt_end:
+                        if dt_end.hour == 0 and dt_end.minute == 0 and dt_end.second == 0:
+                            dt_end = dt_end.replace(hour=23, minute=59, second=59, microsecond=999999)
+                        query = query.filter(AuditLog.timestamp <= dt_end)
+
+                total_count = query.count()
+                offset = (page - 1) * limit
+                logs = query.order_by(AuditLog.timestamp.desc()).offset(offset).limit(limit).all()
+
+                log_list = []
+                for l in logs:
+                    d_dict = None
+                    if l.details:
+                        try:
+                            d_dict = json.loads(l.details)
+                        except Exception:
+                            d_dict = l.details
+                    log_list.append({
+                        "id": l.id,
+                        "user_id": l.user_id,
+                        "action": l.action,
+                        "target_id": l.target_id,
+                        "details": d_dict,
+                        "timestamp": l.timestamp.isoformat() if l.timestamp else None
+                    })
+
+                pages = (total_count + limit - 1) // limit if limit > 0 else 1
+                return {
+                    "total": total_count,
+                    "page": page,
+                    "limit": limit,
+                    "pages": pages,
+                    "logs": log_list
+                }
+            except Exception as e:
+                logger.error(f"Error fetching audit logs: {str(e)}", exc_info=True)
+                return {"total": 0, "page": page, "limit": limit, "pages": 0, "logs": []}
 
     def _parse_datetime(self, val: str) -> Optional[datetime]:
         """
@@ -361,7 +437,12 @@ class DatabaseOperations:
 
                 # 2.5 Salary -> Hourly Cost Auto-calculation
                 salary_val = float(data.get("salary") or 0.0)
-                data["hourly_cost_rate"] = salary_val / (26 * 8)
+                working_days = int(data.get("working_days") or 22)
+                shift_hours = int(data.get("shift_hours") or 8)
+                if "hourly_cost_rate" in data and data["hourly_cost_rate"] is not None and float(data["hourly_cost_rate"]) > 0:
+                    data["hourly_cost_rate"] = round(float(data["hourly_cost_rate"]), 2)
+                else:
+                    data["hourly_cost_rate"] = round(salary_val / (working_days * shift_hours), 2) if (working_days * shift_hours) > 0 else 0.0
 
                 # Remove extra fields not in table
                 data.pop("department", None)
@@ -416,6 +497,7 @@ class DatabaseOperations:
                 if "aadhaar_number" in data:
                     data["adhar_number"] = data.pop("aadhaar_number")
 
+                old_username = employee.username
                 from .encryption import encrypt_data
                 for key, value in data.items():
                     if hasattr(employee, key):
@@ -425,10 +507,29 @@ class DatabaseOperations:
                             value = encrypt_data(value)
                         setattr(employee, key, value)
                 
-                # Auto-recalculate hourly cost rate when salary is edited
-                if "salary" in data:
-                    employee.hourly_cost_rate = float(data["salary"] or 0.0) / (26 * 8)
+                # Auto-recalculate hourly cost rate when salary, working_days, or shift_hours is edited
+                if "hourly_cost_rate" in data and data["hourly_cost_rate"] is not None:
+                    employee.hourly_cost_rate = round(float(data["hourly_cost_rate"]), 2)
+                elif "salary" in data or "working_days" in data or "shift_hours" in data:
+                    w_days = int(data.get("working_days") or getattr(employee, "working_days", 22) or 22)
+                    s_hours = int(data.get("shift_hours") or getattr(employee, "shift_hours", 8) or 8)
+                    sal = float(data.get("salary") if "salary" in data else (employee.salary or 0.0))
+                    employee.hourly_cost_rate = round(sal / (w_days * s_hours), 2) if (w_days * s_hours) > 0 else 0.0
+
                 
+                # Sync credentials to Admins if a matching admin exists
+                if old_username:
+                    admin = session.query(Admins).filter(Admins.username == old_username).first()
+                    if admin:
+                        if "username" in data:
+                            admin.username = employee.username
+                        if "password" in data:
+                            admin.password = employee.password
+                        if "email" in data:
+                            admin.email = employee.email
+                        if "full_name" in data:
+                            admin.full_name = employee.full_name
+
                 session.commit()
                 session.refresh(employee)
                 res = self.model_to_dict(employee)
@@ -478,19 +579,47 @@ class DatabaseOperations:
                 else:
                     task_date = datetime.now()
 
-                # Normalize to date to perform date.between check
+                # Normalize to date to perform date.between check (±1 day for overnight shifts)
                 task_cal_date = task_date.date()
-                start_of_day = datetime.combine(task_cal_date, datetime.min.time())
-                end_of_day = datetime.combine(task_cal_date, datetime.max.time())
+                start_of_day = datetime.combine(task_cal_date - timedelta(days=1), datetime.min.time())
+                end_of_day = datetime.combine(task_cal_date + timedelta(days=1), datetime.max.time())
+                cutoff_time = datetime.now() - timedelta(hours=36)
 
+                # Resilient Attendance Search: Check active sessions (check_out_time IS NULL), ±1 day window, or recent 36h check-ins
                 attendance = session.query(Attendance).filter(
                     Attendance.employee_id == employee_id,
-                    Attendance.date.between(start_of_day, end_of_day),
-                    Attendance.check_in_time.isnot(None)
+                    Attendance.check_in_time.isnot(None),
+                    (
+                        (Attendance.check_out_time.is_(None)) |
+                        (Attendance.date.between(start_of_day, end_of_day)) |
+                        (Attendance.check_in_time >= cutoff_time)
+                    )
                 ).order_by(Attendance.check_in_time.desc()).first()
+
+                # Username / Employee ID fallback matching if employee_id didn't match directly
+                if not attendance:
+                    emp_rec = session.query(Employees).filter((Employees.id == employee_id) | (Employees.username == employee_id)).first()
+                    if emp_rec:
+                        alt_id = emp_rec.username if emp_rec.id == employee_id else emp_rec.id
+                        attendance = session.query(Attendance).filter(
+                            Attendance.employee_id == alt_id,
+                            Attendance.check_in_time.isnot(None),
+                            (
+                                (Attendance.check_out_time.is_(None)) |
+                                (Attendance.date.between(start_of_day, end_of_day)) |
+                                (Attendance.check_in_time >= cutoff_time)
+                            )
+                        ).order_by(Attendance.check_in_time.desc()).first()
 
                 if not attendance:
                     return json.dumps({"error": "Access Denied: You must check in before logging any tasks."})
+                
+                # Update attendance status to Extended Shift if task logged after 11:59 PM of task date
+                now = datetime.now()
+                boundary_time = datetime.combine(task_cal_date, datetime.min.time().replace(hour=23, minute=59, second=0))
+                if now >= boundary_time:
+                    attendance.attendance_status = "Extended Shift"
+                    attendance.notes = (attendance.notes + " | " if attendance.notes else "") + "Logged task after 11:59 PM"
                 
                 # Check if employee has any completed shift today
                 has_completed_shift_today = session.query(Attendance).filter(
@@ -695,19 +824,47 @@ class DatabaseOperations:
                 else:
                     task_date = datetime.now()
 
-                # Normalize to date to perform date.between check
+                # Normalize to date to perform date.between check (±1 day for overnight shifts)
                 task_cal_date = task_date.date()
-                start_of_day = datetime.combine(task_cal_date, datetime.min.time())
-                end_of_day = datetime.combine(task_cal_date, datetime.max.time())
+                start_of_day = datetime.combine(task_cal_date - timedelta(days=1), datetime.min.time())
+                end_of_day = datetime.combine(task_cal_date + timedelta(days=1), datetime.max.time())
+                cutoff_time = datetime.now() - timedelta(hours=36)
 
+                # Resilient Attendance Search: Check active sessions (check_out_time IS NULL), ±1 day window, or recent 36h check-ins
                 attendance = session.query(Attendance).filter(
                     Attendance.employee_id == employee_id,
-                    Attendance.date.between(start_of_day, end_of_day),
-                    Attendance.check_in_time.isnot(None)
+                    Attendance.check_in_time.isnot(None),
+                    (
+                        (Attendance.check_out_time.is_(None)) |
+                        (Attendance.date.between(start_of_day, end_of_day)) |
+                        (Attendance.check_in_time >= cutoff_time)
+                    )
                 ).order_by(Attendance.check_in_time.desc()).first()
+
+                # Username / Employee ID fallback matching if employee_id didn't match directly
+                if not attendance:
+                    emp_rec = session.query(Employees).filter((Employees.id == employee_id) | (Employees.username == employee_id)).first()
+                    if emp_rec:
+                        alt_id = emp_rec.username if emp_rec.id == employee_id else emp_rec.id
+                        attendance = session.query(Attendance).filter(
+                            Attendance.employee_id == alt_id,
+                            Attendance.check_in_time.isnot(None),
+                            (
+                                (Attendance.check_out_time.is_(None)) |
+                                (Attendance.date.between(start_of_day, end_of_day)) |
+                                (Attendance.check_in_time >= cutoff_time)
+                            )
+                        ).order_by(Attendance.check_in_time.desc()).first()
 
                 if not attendance:
                     return json.dumps({"error": "Access Denied: You must check in before logging any tasks."})
+                
+                # Update attendance status to Extended Shift if task logged after 11:59 PM of task date
+                now = datetime.now()
+                boundary_time = datetime.combine(task_cal_date, datetime.min.time().replace(hour=23, minute=59, second=0))
+                if now >= boundary_time:
+                    attendance.attendance_status = "Extended Shift"
+                    attendance.notes = (attendance.notes + " | " if attendance.notes else "") + "Logged task after 11:59 PM"
                 
                 # Check if employee has any completed shift today
                 has_completed_shift_today = session.query(Attendance).filter(
@@ -919,10 +1076,6 @@ class DatabaseOperations:
             try:
                 # Sanitize incoming payload
                 data = self._sanitize_payload(data)
-                
-                # Normalize spelling typo in referral field
-                if "reffered_by" in data and "referred_by" not in data:
-                    data["referred_by"] = data["reffered_by"]
 
                 # Intercept and normalize legacy cost_type representing platform
                 platforms = {"Mobile App", "Website", "Software", "Social Media", "Graphics"}
@@ -1061,114 +1214,12 @@ class DatabaseOperations:
     def sync_project_billing(self, session, proj) -> None:
         """
         Dynamically synchronizes and generates project billing records in the DB
-        based on the active billing/cost type of the project.
+        using the central BillingEngine logic module.
         """
         try:
-            cost_type = proj.cost_type or "Internal / Non-Billable"
-            
-            # Normalize billing type strings
-            if cost_type not in ["Fixed Price", "Monthly Retainer", "Internal / Non-Billable"]:
-                cost_type = "Internal / Non-Billable"
-
-            # 1. Void or delete all billing records of OTHER billing types
-            other_billings = session.query(ProjectBilling).filter(
-                ProjectBilling.project_id == proj.id,
-                ProjectBilling.billing_type != cost_type
-            ).all()
-            for ob in other_billings:
-                session.delete(ob)
-            session.flush()
-
-            if cost_type == "Fixed Price":
-                # Fixed price has a single billing record for the entire contract value
-                contract_billing = session.query(ProjectBilling).filter_by(
-                    project_id=proj.id,
-                    billing_type="Fixed Price"
-                ).first()
-                
-                amount = float(proj.client_cost or 0.0)
-                if contract_billing:
-                    contract_billing.amount = amount
-                    contract_billing.description = "Fixed Price - Contract Value"
-                else:
-                    new_b = ProjectBilling(
-                        project_id=proj.id,
-                        amount=amount,
-                        billing_type="Fixed Price",
-                        description="Fixed Price - Contract Value",
-                        status="Billed",
-                        billing_date=proj.created_at or datetime.now()
-                    )
-                    session.add(new_b)
-                
-            elif cost_type == "Monthly Retainer":
-                # Monthly Retainer generates recurring bills from start_date to today/end_date
-                start_date = None
-                if proj.start_date and proj.start_date != "N/A":
-                    try:
-                        start_date = datetime.strptime(proj.start_date.strip(), "%Y-%m-%d")
-                    except ValueError:
-                        pass
-                if not start_date:
-                    start_date = proj.created_at or datetime.now()
-
-                # Determine billing end boundary
-                end_boundary = datetime.now()
-                if proj.status in ["Completed", "Cancelled"] and proj.end_date and proj.end_date != "N/A":
-                    try:
-                        end_boundary = datetime.strptime(proj.end_date.strip(), "%Y-%m-%d")
-                    except ValueError:
-                        pass
-                
-                # Monthly increment helper
-                import calendar
-                def add_months(sourcedate, months):
-                    month = sourcedate.month - 1 + months
-                    year = sourcedate.year + month // 12
-                    month = month % 12 + 1
-                    day = min(sourcedate.day, calendar.monthrange(year, month)[1])
-                    return datetime(year, month, day, sourcedate.hour, sourcedate.minute, sourcedate.second)
-
-                # Generate billing dates
-                billing_rate = float(proj.billing_rate or 0.0)
-                i = 0
-                while True:
-                    b_date = add_months(start_date, i)
-                    if b_date > end_boundary:
-                        break
-                    
-                    # Check if billing for this month already exists
-                    month_start = datetime(b_date.year, b_date.month, 1)
-                    if b_date.month == 12:
-                        month_end = datetime(b_date.year + 1, 1, 1)
-                    else:
-                        month_end = datetime(b_date.year, b_date.month + 1, 1)
-
-                    existing = session.query(ProjectBilling).filter(
-                        ProjectBilling.project_id == proj.id,
-                        ProjectBilling.billing_type == "Monthly Retainer",
-                        ProjectBilling.billing_date >= month_start,
-                        ProjectBilling.billing_date < month_end
-                    ).first()
-
-                    description = f"Monthly Retainer - {b_date.strftime('%B %Y')}"
-                    if existing:
-                        existing.amount = billing_rate
-                        existing.description = description
-                    else:
-                        new_mb = ProjectBilling(
-                            project_id=proj.id,
-                            amount=billing_rate,
-                            billing_type="Monthly Retainer",
-                            description=description,
-                            status="Billed",
-                            billing_date=b_date
-                        )
-                        session.add(new_mb)
-                    i += 1
-
-            elif cost_type == "Internal / Non-Billable":
-                pass
+            # Delegate cycle synchronization to BillingEngine
+            BillingEngine.sync_project_billing_cycles(session, proj, ProjectBilling)
+            BillingEngine.evaluate_scheduled_project_billings(session)
 
             # Intercept: update task billing amounts dynamically based on billing type
             dev_tasks = session.query(DeveloperTasks).filter_by(project_id=proj.id).all()
@@ -1239,6 +1290,7 @@ class DatabaseOperations:
         except Exception as e:
             logger.error(f"Error in _calculate_payment_stats: {str(e)}", exc_info=True)
             return {
+                "client_cost": float(proj.client_cost or 0.0),
                 "total_paid": 0.0,
                 "pending_amount": float(proj.client_cost or 0.0),
                 "payment_status": "Unpaid"
@@ -1954,6 +2006,163 @@ class DatabaseOperations:
             except Exception as e:
                 return self._handle_error("get_project", e)
 
+    def get_aggregated_project_details(self, project_id: str, employee_id: str = None) -> str:
+        with self.SessionLocal() as session:
+            try:
+                # 1. Fetch core project details
+                proj = session.query(Projects).filter_by(id=project_id).first()
+                if not proj:
+                    return json.dumps({"error": "Project not found"})
+                
+                p_dict = self.model_to_dict(proj)
+                p_dict['progress'] = proj.progress if proj.progress else "0%"
+                p_dict['content_agreement'] = self._enrich_project_agreement(session, proj.id, proj.content_agreement)
+                
+                # Build universal Employee & Role lookup map to eliminate 'Unknown' badges across all sections
+                all_employees = session.query(Employees, Departments_Roles).outerjoin(
+                    Departments_Roles, Employees.role_id == Departments_Roles.id
+                ).all()
+                emp_name_map = {}
+                emp_role_map = {}
+                for e, r in all_employees:
+                    name = e.full_name or e.username or e.email or "Employee"
+                    role_str = r.role_name if r else "Employee"
+                    emp_name_map[e.id] = name
+                    emp_name_map[e.username] = name
+                    emp_role_map[e.id] = role_str
+
+                # Manager name resolution
+                if proj.manager and proj.manager in emp_name_map:
+                    p_dict['manager_full_name'] = emp_name_map[proj.manager]
+                else:
+                    p_dict['manager_full_name'] = proj.manager or "N/A"
+
+                # 2. Fetch Assignments
+                assignments = session.query(ProjectAssignments, Employees, Departments_Roles).join(
+                    Employees, ProjectAssignments.employee_id == Employees.id
+                ).outerjoin(
+                    Departments_Roles, Employees.role_id == Departments_Roles.id
+                ).filter(ProjectAssignments.project_id == project_id).all()
+                
+                assign_list = []
+                for assign, emp, role in assignments:
+                    a_dict = self.model_to_dict(assign)
+                    a_dict['full_name'] = emp.full_name or emp.username or "Employee"
+                    a_dict['job_title'] = role.role_name if role else "Employee"
+                    a_dict['hourly_cost_rate'] = emp.hourly_cost_rate
+                    a_dict['hourly_billing_rate'] = emp.hourly_billing_rate
+                    assign_list.append(a_dict)
+
+                # 3. Fetch Timeline & Milestone Assignments
+                from .database_tables import MilestoneAssignments
+                timeline_query = session.query(ProjectTimeline).filter_by(project_id=project_id)
+                if employee_id:
+                    timeline_query = timeline_query.join(
+                        MilestoneAssignments, ProjectTimeline.id == MilestoneAssignments.milestone_id
+                    ).filter(MilestoneAssignments.employee_id == employee_id)
+                timeline = timeline_query.order_by(ProjectTimeline.expected_start).all()
+                
+                timeline_list = []
+                for t in timeline:
+                    t_dict = self.model_to_dict(t)
+                    m_assigns = session.query(MilestoneAssignments).filter_by(milestone_id=t.id).all()
+                    t_dict['assigned_employee_ids'] = [m.employee_id for m in m_assigns]
+                    t_dict['assigned_employee_names'] = [emp_name_map.get(m.employee_id, "Employee") for m in m_assigns]
+                    timeline_list.append(t_dict)
+
+                # 4. Fetch SRS Documents
+                documents = session.query(SRS_Documents).filter_by(project_id=project_id).order_by(SRS_Documents.created_at.desc()).all()
+                srs_list = []
+                for d in documents:
+                    d_dict = self.model_to_dict(d)
+                    d_dict['approved_by_name'] = emp_name_map.get(d.approved_by, d.approved_by or "N/A")
+                    srs_list.append(d_dict)
+
+                # 5. Fetch Expenses
+                expenses = session.query(ProjectExpenses).filter_by(project_id=project_id).all()
+                expenses_list = [self.model_to_dict(e) for e in expenses]
+
+                # 6. Fetch Payments
+                payments = session.query(ProjectPayments).filter_by(project_id=project_id).order_by(ProjectPayments.payment_date.desc()).all()
+                payments_list = [self.model_to_dict(p) for p in payments]
+
+                # 7. Fetch Receivables
+                recs = session.query(ClientReceivables).filter_by(project_id=project_id).order_by(ClientReceivables.due_date.asc()).all()
+                receivables_list = [self.model_to_dict(r) for r in recs]
+
+                # 8. Fetch Tasks for this specific project (Enriched with employee names)
+                dev_tasks = session.query(DeveloperTasks).filter_by(project_id=project_id).all()
+                content_tasks = session.query(ContentCreatorTasks).filter_by(project_id=project_id).all()
+                
+                tasks_list = []
+                for dt in dev_tasks:
+                    d = self.model_to_dict(dt)
+                    d['task_type'] = 'developer'
+                    emp_name = emp_name_map.get(dt.employee_id, dt.employee_id or "Unknown")
+                    d['full_name'] = emp_name
+                    d['employee_name'] = emp_name
+                    d['job_title'] = emp_role_map.get(dt.employee_id, "Developer")
+                    if dt.handover_for_employee_id:
+                        d['handover_for_employee_name'] = emp_name_map.get(dt.handover_for_employee_id, "N/A")
+                    tasks_list.append(d)
+
+                for ct in content_tasks:
+                    c = self.model_to_dict(ct)
+                    c['task_type'] = 'content_creator'
+                    emp_name = emp_name_map.get(ct.employee_id, ct.employee_id or "Unknown")
+                    c['full_name'] = emp_name
+                    c['employee_name'] = emp_name
+                    c['job_title'] = emp_role_map.get(ct.employee_id, "Content Creator")
+                    if ct.handover_for_employee_id:
+                        c['handover_for_employee_name'] = emp_name_map.get(ct.handover_for_employee_id, "N/A")
+                    tasks_list.append(c)
+
+                # 9. Fetch checklists
+                templates = session.query(ChecklistTemplate).filter(ChecklistTemplate.project_id == project_id).all()
+                existing_states = session.query(ProjectChecklistState).filter(ProjectChecklistState.project_id == project_id).all()
+                state_map = {state.checklist_id: state for state in existing_states}
+                
+                start_items = []
+                end_items = []
+                for t in templates:
+                    is_checked = False
+                    state_id = "new"
+                    if t.id in state_map:
+                        is_checked = state_map[t.id].is_checked
+                        state_id = state_map[t.id].id
+                    
+                    item = {
+                        "id": state_id,
+                        "checklist_id": t.id,
+                        "task_description": t.task_description,
+                        "is_checked": is_checked
+                    }
+                    if t.phase == "START":
+                        start_items.append(item)
+                    elif t.phase == "END":
+                        end_items.append(item)
+                
+                checklists_start = {"phase": "START", "items": start_items}
+                checklists_end = {"phase": "END", "items": end_items}
+
+                # Construct final aggregated result
+                result = {
+                    "project": p_dict,
+                    "assignments": assign_list,
+                    "timeline": timeline_list,
+                    "srs": srs_list,
+                    "expenses": expenses_list,
+                    "payments": payments_list,
+                    "receivables": receivables_list,
+                    "tasks": tasks_list,
+                    "checklists_start": checklists_start,
+                    "checklists_end": checklists_end
+                }
+
+                return json.dumps(result, indent=4, default=str)
+            except Exception as e:
+                return self._handle_error("get_aggregated_project_details", e)
+
     def export_project_csv_data(self, project_id: str) -> Optional[str]:
         import csv
         import io
@@ -2009,14 +2218,12 @@ class DatabaseOperations:
                 writer.writerow([
                     "Project ID", "Project Name", "Project Type", "Project Platform", "Description", "Status",
                     "Client Cost", "Budget", "Approx Cost", "Cost Type", "Start Date",
-                    "End Date", "Progress", "Manager", "Client Name", "Team", 
-                    "Referred By", "Filled By", "Assigned To", "Created At", "Updated At"
+                    "End Date", "Progress", "Manager", "Client Name", "Created At", "Updated At"
                 ])
                 writer.writerow([
                     proj.id, proj.name, proj.project_type, proj.project_platform or "N/A", proj.description, proj.status,
                     proj.client_cost, proj.budget, proj.approx_cost, proj.cost_type, proj.start_date,
-                    proj.end_date, proj.progress or "0%", proj.manager, proj.client, proj.team,
-                    proj.referred_by, proj.filled_by, proj.assigned_to, proj.created_at, proj.updated_at
+                    proj.end_date, proj.progress or "0%", proj.manager, proj.client, proj.created_at, proj.updated_at
                 ])
                 writer.writerow([]) # Empty spacer
                 
@@ -2299,8 +2506,7 @@ class DatabaseOperations:
                 proj_headers = [
                     "Project ID", "Project Name", "Project Type", "Project Platform", "Description", "Status",
                     "Client Cost", "Budget", "Approx Cost", "Cost Type", "Start Date",
-                    "End Date", "Progress", "Manager", "Client Name", "Team", 
-                    "Referred By", "Filled By", "Assigned To", "Created At", "Updated At"
+                    "End Date", "Progress", "Manager", "Client Name", "Created At", "Updated At"
                 ]
                 # Format Dates/Times
                 start_date_str = fmt_date(proj.start_date)
@@ -2311,16 +2517,14 @@ class DatabaseOperations:
                 proj_rows = [[
                     proj.id, proj.name, proj.project_type, proj.project_platform or "N/A", proj.description or "N/A", proj.status,
                     proj.client_cost or 0.0, proj.budget or 0.0, proj.approx_cost or 0.0, proj.cost_type or "N/A", start_date_str,
-                    end_date_str, proj.progress or "0%", proj.manager or "N/A", proj.client or "N/A", proj.team or "N/A",
-                    proj.referred_by or "N/A", proj.filled_by or "N/A", proj.assigned_to or "N/A", created_at_str, updated_at_str
+                    end_date_str, proj.progress or "0%", proj.manager or "N/A", proj.client or "N/A", created_at_str, updated_at_str
                 ]]
                 
                 # Alignments: ID(C), Name(L), Type(C), Platform(C), Desc(L), Status(C), ClientCost(R), Budget(R), ApproxCost(R), CostType(C), Dates(C), Progress(C), etc.
                 proj_alignments = [
                     center_align, left_align, center_align, center_align, left_align, center_align,
                     right_align, right_align, right_align, center_align, center_align,
-                    center_align, center_align, left_align, left_align, left_align,
-                    left_align, left_align, left_align, center_align, center_align
+                    center_align, center_align, left_align, left_align, center_align, center_align
                 ]
                 # Numeric Formats: Client Cost (index 6), Budget (index 7), Approx Cost (index 8)
                 proj_formats = {6: "₹#,##0.00", 7: "₹#,##0.00", 8: "₹#,##0.00"}
@@ -2524,10 +2728,6 @@ class DatabaseOperations:
                 
                 # Sanitize incoming payload
                 data = self._sanitize_payload(data)
-                
-                # Normalize spelling typo in referral field
-                if "reffered_by" in data and "referred_by" not in data:
-                    data["referred_by"] = data["reffered_by"]
 
                 # Intercept and normalize legacy cost_type representing platform
                 platforms = {"Mobile App", "Website", "Software", "Social Media", "Graphics"}
@@ -2733,10 +2933,26 @@ class DatabaseOperations:
                 admin = session.query(Admins).filter_by(id=admin_id).first()
                 if not admin:
                     return json.dumps({"error": "Admin not found"})
+                
+                old_username = admin.username
                 for key, value in data.items():
                     if key == "password":
                         value = get_password_hash(value)
                     setattr(admin, key, value)
+
+                # Sync credentials to Employees if a matching employee exists
+                if old_username:
+                    employee = session.query(Employees).filter(Employees.username == old_username).first()
+                    if employee:
+                        if "username" in data:
+                            employee.username = admin.username
+                        if "password" in data:
+                            employee.password = admin.password
+                        if "email" in data:
+                            employee.email = admin.email
+                        if "full_name" in data:
+                            employee.full_name = admin.full_name
+
                 session.commit()
                 session.refresh(admin)
                 res = self.model_to_dict(admin)
@@ -2990,7 +3206,7 @@ class DatabaseOperations:
     def _auto_checkout_old_sessions_internal(self, session, employee_id: str, now: datetime) -> None:
         """
         Scans for any open attendance records (check_in_time present, check_out_time missing)
-        for this employee that are older than 16 hours, and auto-completes them (8 hours duration)
+        for this employee that are older than 16 hours, and auto-completes them (dynamic working hours duration)
         so that data remains clean and doesn't conflict with today's logins/check-ins.
         Also scans for overnight sessions spanning into today past the 10-minute shift reset boundary.
         """
@@ -3013,11 +3229,12 @@ class DatabaseOperations:
             Attendance.check_out_time.is_(None)
         ).all()
         
+        working_hours = employee.working_hours or 8.0
         for r in dangling_records:
             if now - r.check_in_time > timedelta(hours=16):
-                r.check_out_time = r.check_in_time + timedelta(hours=8)
-                r.total_hours = 8.0
-                r.notes = (r.notes + " | " if r.notes else "") + "Auto Checked Out (forgot to check out)"
+                r.check_out_time = r.check_in_time + timedelta(hours=working_hours)
+                r.total_hours = working_hours
+                r.notes = (r.notes + " | " if r.notes else "") + f"Auto Checked Out (forgot to check out, duration: {working_hours}h)"
                 r.status = "Checked Out"
             elif r.check_in_time < today_shift_reset and now >= today_shift_reset:
                 r.check_out_time = today_shift_reset
@@ -3025,6 +3242,11 @@ class DatabaseOperations:
                 r.total_hours = max(0.0, time_diff.total_seconds() / 3600.0)
                 r.notes = (r.notes + " | " if r.notes else "") + "Auto Checked Out at shift reset (overnight shift)"
                 r.status = "Checked Out"
+            
+            if r.check_out_time:
+                checkout_boundary = datetime.combine(r.check_in_time.date(), datetime.min.time().replace(hour=23, minute=59, second=0))
+                if r.check_out_time >= checkout_boundary:
+                    r.attendance_status = "Extended Shift"
         session.commit()
 
     def _auto_checkout_all_old_sessions_internal(self, session, now: datetime) -> None:
@@ -3042,6 +3264,7 @@ class DatabaseOperations:
             emp = session.query(Employees).filter_by(id=r.employee_id).first()
             if not emp:
                 continue
+            working_hours = emp.working_hours or 8.0
             shift_start_str = emp.shift_start_time or "09:00"
             try:
                 sh, sm = map(int, shift_start_str.split(":"))
@@ -3051,9 +3274,9 @@ class DatabaseOperations:
             today_shift_reset = datetime.combine(now.date(), datetime.min.time().replace(hour=sh, minute=sm)) - timedelta(minutes=10)
             
             if now - r.check_in_time > timedelta(hours=16):
-                r.check_out_time = r.check_in_time + timedelta(hours=8)
-                r.total_hours = 8.0
-                r.notes = (r.notes + " | " if r.notes else "") + "Auto Checked Out (forgot to check out)"
+                r.check_out_time = r.check_in_time + timedelta(hours=working_hours)
+                r.total_hours = working_hours
+                r.notes = (r.notes + " | " if r.notes else "") + f"Auto Checked Out (forgot to check out, duration: {working_hours}h)"
                 r.status = "Checked Out"
             elif r.check_in_time < today_shift_reset and now >= today_shift_reset:
                 r.check_out_time = today_shift_reset
@@ -3061,9 +3284,14 @@ class DatabaseOperations:
                 r.total_hours = max(0.0, time_diff.total_seconds() / 3600.0)
                 r.notes = (r.notes + " | " if r.notes else "") + "Auto Checked Out at shift reset (overnight shift)"
                 r.status = "Checked Out"
+            
+            if r.check_out_time:
+                checkout_boundary = datetime.combine(r.check_in_time.date(), datetime.min.time().replace(hour=23, minute=59, second=0))
+                if r.check_out_time >= checkout_boundary:
+                    r.attendance_status = "Extended Shift"
         session.commit()
 
-    def check_in(self, employee_id: str, ip_address: str = None) -> str:
+    def check_in(self, employee_id: str, ip_address: str = None, work_mode: str = "Office", device_info: str = "Unknown") -> str:
         with self.SessionLocal() as session:
             try:
                 now = datetime.now()
@@ -3107,7 +3335,8 @@ class DatabaseOperations:
                     attendance_status = "Extended Shift"
                 else:
                     target_date = now.date()
-                    if now > today_shift_end:
+                    boundary_time = datetime.combine(target_date, datetime.min.time().replace(hour=23, minute=59, second=0))
+                    if now >= boundary_time:
                         attendance_status = "Extended Shift"
                     else:
                         diff = now - today_shift_start
@@ -3134,7 +3363,9 @@ class DatabaseOperations:
                     existing_record.status = "Checked In"
                     existing_record.attendance_status = attendance_status
                     existing_record.ip_address = ip_address
-                    existing_record.notes = (existing_record.notes + " | " if existing_record.notes else "") + f"Checked in (overrode {existing_record.status}) | Attendance: {attendance_status}"
+                    existing_record.device_info = device_info
+                    existing_record.work_mode = work_mode
+                    existing_record.notes = (existing_record.notes + " | " if existing_record.notes else "") + f"Checked in (overrode {existing_record.status}) | Attendance: {attendance_status} | Work Mode: {work_mode}"
                     session.commit()
                     session.refresh(existing_record)
                     attendence_dict = self.model_to_dict(existing_record)
@@ -3148,7 +3379,9 @@ class DatabaseOperations:
                     status="Checked In",
                     attendance_status=attendance_status,
                     ip_address=ip_address,
-                    notes=f"Checked in | Attendance: {attendance_status}"
+                    device_info=device_info,
+                    work_mode=work_mode,
+                    notes=f"Checked in | Attendance: {attendance_status} | Work Mode: {work_mode}"
                 )
 
                 session.add(new_attendance)
@@ -3161,7 +3394,7 @@ class DatabaseOperations:
                 session.rollback()
                 return self._handle_error("check_in", e)
 
-    def check_out(self, employee_id: str) -> str:
+    def check_out(self, employee_id: str, ip_address: str = None, device_info: str = "Unknown") -> str:
         with self.SessionLocal() as session:
             try:
                 now = datetime.now()
@@ -3174,15 +3407,25 @@ class DatabaseOperations:
                     Attendance.check_in_time.isnot(None),
                     Attendance.check_out_time.is_(None)
                 ).order_by(Attendance.check_in_time.desc()).first()
-                
+
                 if not attendance:
                     return json.dumps({"error": "No active check-in record found. Please check in first."})
-                
+
                 attendance.check_out_time = now
                 attendance.status = "Checked Out"
+                attendance.checkout_ip_address = ip_address
+                attendance.checkout_device_info = device_info
+                
                 # Calculate total hours
                 time_diff = attendance.check_out_time - attendance.check_in_time
                 attendance.total_hours = time_diff.total_seconds() / 3600.0
+
+                # Extended Shift Logic (Checkout after 11:59 PM of the record date)
+                check_in_day = attendance.date.date()
+                boundary_time = datetime.combine(check_in_day, datetime.min.time().replace(hour=23, minute=59, second=0))
+                if now >= boundary_time:
+                    attendance.attendance_status = "Extended Shift"
+                    attendance.notes = (attendance.notes + " | " if attendance.notes else "") + "Shift extended past 11:59 PM"
 
                 session.commit()
                 session.refresh(attendance)
@@ -3220,14 +3463,23 @@ class DatabaseOperations:
                 status = "Absent"
                 notes = "Auto-recorded absent (no check-in detected)"
                 if approved_leave:
-                    status = "On Leave"
-                    notes = f"On Leave (Approved request: {approved_leave.reason})"
+                    is_half_day = (approved_leave.half_day_option in ["First Half", "Second Half", "Half Day"]) or (approved_leave.total_days == 0.5)
+                    if is_half_day:
+                        status = "Half Day"
+                        attendance_status = "Half-Day"
+                        notes = f"Half Day Leave ({approved_leave.half_day_option or 'Half Day'}: {approved_leave.reason})"
+                    else:
+                        status = "On Leave"
+                        attendance_status = "On Leave"
+                        notes = f"On Leave (Approved request: {approved_leave.reason})"
+                else:
+                    attendance_status = "Absent"
 
                 absent_record = Attendance(
                     employee_id=emp.id,
                     date=now,
                     status=status,
-                    attendance_status=status,
+                    attendance_status=attendance_status,
                     total_hours=0.0,
                     notes=notes
                 )
@@ -3243,7 +3495,8 @@ class DatabaseOperations:
                 session.rollback()
                 return self._handle_error("record_daily_absences", e)
 
-    def get_all_attendance(self) -> str:
+    def get_all_attendance(self, start_date: str = None, end_date: str = None) -> str:
+        from datetime import datetime, timedelta
         with self.SessionLocal() as session:
             try:
                 now = datetime.now()
@@ -3253,9 +3506,18 @@ class DatabaseOperations:
                 # Automatically record absences first!
                 self.record_daily_absences_internal(session)
                 
+                start_dt = now - timedelta(days=2)
+                end_dt = now + timedelta(days=1) # include today fully
+                if start_date:
+                    start_dt = self._parse_datetime(start_date) if isinstance(start_date, str) else start_date
+                if end_date:
+                    end_dt = self._parse_datetime(end_date) if isinstance(end_date, str) else end_date
+
                 # Fetch all attendance records joined with Employees to resolve names
                 records = session.query(Attendance, Employees.full_name)\
                                  .join(Employees, Attendance.employee_id == Employees.id)\
+                                 .filter(Attendance.date >= (start_dt.date() if hasattr(start_dt, 'date') else start_dt))\
+                                 .filter(Attendance.date <= (end_dt.date() if hasattr(end_dt, 'date') else end_dt))\
                                  .order_by(Attendance.date.desc())\
                                  .all()
                 
@@ -3298,8 +3560,13 @@ class DatabaseOperations:
                 payment = session.query(ProjectPayments).filter_by(id=payment_id).first()
                 if not payment:
                     return json.dumps({"error": "Payment record not found."})
+                project_id = payment.project_id
                 session.delete(payment)
                 session.commit()
+
+                # Sync and auto-heal client receivables after payment deletion
+                self._sync_and_heal_receivable_due_dates_internal(session, project_id)
+
                 return json.dumps({"message": "Payment record deleted successfully."})
             except Exception as e:
                 session.rollback()
@@ -3316,10 +3583,23 @@ class DatabaseOperations:
             except Exception as e:
                 return self._handle_error("get_employee_attendance", e)
 
-    def get_all_login_history(self) -> str:
+    def get_all_login_history(self, start_date: str = None, end_date: str = None) -> str:
+        from datetime import datetime, timedelta
         with self.SessionLocal() as session:
             try:
-                records = session.query(LoginHistory).order_by(LoginHistory.login_timestamp.desc()).all()
+                now = datetime.now()
+                start_dt = now - timedelta(days=2)
+                end_dt = now + timedelta(days=1)
+                if start_date:
+                    start_dt = self._parse_datetime(start_date) if isinstance(start_date, str) else start_date
+                if end_date:
+                    end_dt = self._parse_datetime(end_date) if isinstance(end_date, str) else end_date
+
+                records = session.query(LoginHistory)\
+                                 .filter(LoginHistory.login_timestamp >= start_dt)\
+                                 .filter(LoginHistory.login_timestamp <= end_dt)\
+                                 .order_by(LoginHistory.login_timestamp.desc())\
+                                 .all()
                 
                 # Fetch all employees and admins to build a fast map for metadata resolution
                 employees = session.query(Employees.id, Employees.full_name, Employees.username).all()
@@ -3356,10 +3636,24 @@ class DatabaseOperations:
             except Exception as e:
                 return self._handle_error("get_all_login_history", e)
 
-    def get_all_leave_requests(self) -> str:
+    def get_all_leave_requests(self, start_date: str = None, end_date: str = None) -> str:
+        from datetime import datetime, timedelta
         with self.SessionLocal() as session:
             try:
-                records = session.query(LeaveRequest).all()
+                now = datetime.now()
+                start_dt = now - timedelta(days=2)
+                end_dt = now + timedelta(days=1)
+                if start_date:
+                    start_dt = self._parse_datetime(start_date) if isinstance(start_date, str) else start_date
+                if end_date:
+                    end_dt = self._parse_datetime(end_date) if isinstance(end_date, str) else end_date
+
+                # Assuming LeaveRequest has a start_date column or similar. Let's use created_at if start_date doesn't work, but start_date is standard in Leave requests
+                records = session.query(LeaveRequest)\
+                                 .filter(LeaveRequest.start_date >= (start_dt.date() if hasattr(start_dt, 'date') else start_dt))\
+                                 .filter(LeaveRequest.start_date <= (end_dt.date() if hasattr(end_dt, 'date') else end_dt))\
+                                 .order_by(LeaveRequest.start_date.desc())\
+                                 .all()
                 return json.dumps([self.model_to_dict(r) for r in records], indent=4, default=str)
             except Exception as e:
                 return self._handle_error("get_all_leave_requests", e)
@@ -3498,6 +3792,31 @@ class DatabaseOperations:
                 
                 old_status = record.status
                 record.status = status
+
+                # Leave Quota Deduction / Refund Logic
+                emp_id = record.employee_id
+                emp = session.query(Employees).filter_by(id=emp_id).first()
+                if emp and old_status != status:
+                    days = record.total_days if (record.total_days is not None and record.total_days > 0) else (0.5 if record.half_day_option in ["First Half", "Second Half", "Half Day"] else 1.0)
+                    leave_type = (record.leave_type or "Paid Leave").strip()
+
+                    # Deduct leave quota when approved
+                    if status == "Approved" and old_status != "Approved":
+                        if "Casual" in leave_type:
+                            emp.used_casual_leaves = (emp.used_casual_leaves or 0.0) + days
+                        elif "Sick" in leave_type:
+                            emp.used_sick_leaves = (emp.used_sick_leaves or 0.0) + days
+                        else:
+                            emp.used_paid_leaves = (emp.used_paid_leaves or 0.0) + days
+                    # Refund leave quota if previously approved and now rejected/cancelled
+                    elif old_status == "Approved" and status in ["Rejected", "Cancelled"]:
+                        if "Casual" in leave_type:
+                            emp.used_casual_leaves = max(0.0, (emp.used_casual_leaves or 0.0) - days)
+                        elif "Sick" in leave_type:
+                            emp.used_sick_leaves = max(0.0, (emp.used_sick_leaves or 0.0) - days)
+                        else:
+                            emp.used_paid_leaves = max(0.0, (emp.used_paid_leaves or 0.0) - days)
+
                 session.commit()
                 session.refresh(record)
 
@@ -3510,8 +3829,6 @@ class DatabaseOperations:
                 )
 
                 # 10. Notify Employee
-                emp_id = record.employee_id
-                emp = session.query(Employees).filter_by(id=emp_id).first()
                 emp_name = emp.full_name if emp else "Employee"
                 
                 new_notif = InAppNotification(
@@ -3537,6 +3854,43 @@ class DatabaseOperations:
             except Exception as e:
                 session.rollback()
                 return self._handle_error("update_leave_request_status", e)
+
+    def update_employee_leave_quota(self, employee_id: str, data: dict) -> str:
+        """Updates an employee's total and used leave quotas."""
+        with self.SessionLocal() as session:
+            try:
+                emp = session.query(Employees).filter_by(id=employee_id).first()
+                if not emp:
+                    return json.dumps({"error": "Employee not found."})
+
+                if "total_paid_leaves" in data and data["total_paid_leaves"] is not None:
+                    emp.total_paid_leaves = float(data["total_paid_leaves"])
+                if "used_paid_leaves" in data and data["used_paid_leaves"] is not None:
+                    emp.used_paid_leaves = float(data["used_paid_leaves"])
+                if "total_casual_leaves" in data and data["total_casual_leaves"] is not None:
+                    emp.total_casual_leaves = float(data["total_casual_leaves"])
+                if "used_casual_leaves" in data and data["used_casual_leaves"] is not None:
+                    emp.used_casual_leaves = float(data["used_casual_leaves"])
+                if "total_sick_leaves" in data and data["total_sick_leaves"] is not None:
+                    emp.total_sick_leaves = float(data["total_sick_leaves"])
+                if "used_sick_leaves" in data and data["used_sick_leaves"] is not None:
+                    emp.used_sick_leaves = float(data["used_sick_leaves"])
+
+                session.commit()
+                session.refresh(emp)
+
+                self.write_audit_log(
+                    user_id="SYSTEM",
+                    action="LEAVE_QUOTA_UPDATE",
+                    target_id=employee_id,
+                    details=data
+                )
+
+                return json.dumps(self.model_to_dict(emp), indent=4, default=str)
+            except Exception as e:
+                session.rollback()
+                return self._handle_error("update_employee_leave_quota", e)
+
 
     def cancel_leave_request_by_employee(self, leave_id: str, employee_id: str) -> str:
         with self.SessionLocal() as session:
@@ -3614,20 +3968,64 @@ class DatabaseOperations:
                     InAppNotification.created_at < seven_days_ago
                 ).delete(synchronize_session=False)
                 
-                # --- AUTO-SYNC RISK NOTIFICATIONS FOR EMPLOYEES ---
-                # Check if this user is an employee
-                employee = session.query(Employees).filter_by(id=user_id, is_active=True).first()
-                if employee:
-                    # A. Check Projects at Risk
-                    # Get assigned projects (via ProjectAssignments)
-                    assigned_projects = session.query(Projects).join(
-                        ProjectAssignments, Projects.id == ProjectAssignments.project_id
-                    ).filter(
-                        ProjectAssignments.employee_id == user_id,
-                        func.lower(func.coalesce(Projects.status, '')) != 'completed'
-                    ).all()
+                # --- AUTO-SYNC RISK NOTIFICATIONS & PAYMENT REMINDERS FOR ALL ROLES ---
+                from src.database.database_tables import Admins, Managers, ClientReceivables, ProjectBilling
+                
+                now = datetime.now()
+                is_admin = session.query(Admins).filter(
+                    (Admins.id == user_id) | (Admins.username == user_id)
+                ).first() is not None
+
+                user_emp = session.query(Employees).filter_by(id=user_id).first()
+                if not is_admin and user_emp and getattr(user_emp, 'access_level', '') in ['SystemAdmin', 'ManagerAdmin']:
+                    is_admin = True
+
+                # A. Auto-Sync Project Payment Reminders (For Admins and Relevant Managers)
+                receivables = session.query(ClientReceivables, Projects.name, Projects.id).join(
+                    Projects, ClientReceivables.project_id == Projects.id
+                ).filter(
+                    ClientReceivables.is_done == False
+                ).all()
+
+                for rec, proj_name, proj_id in receivables:
+                    due_date_str = rec.due_date or "N/A"
+                    amount_val = float(rec.amount) if rec.amount else 0.0
+                    amount_str = f"₹{amount_val:,.2f}"
+                    p_title = f"💰 Payment Due: {proj_name}"
+                    p_msg = f"Payment '{rec.item_name or 'Billing Cycle'}' ({amount_str}) for project '{proj_name}' is pending/due on {due_date_str}."
+
+                    # Payment due notifications are strictly for SystemAdmin / Admin users, not managers
+                    should_sync = is_admin
+
+                    if should_sync:
+                        exists = session.query(InAppNotification).filter_by(
+                            user_id=user_id,
+                            title=p_title,
+                            is_read=False
+                        ).first()
+                        if not exists:
+                            session.add(InAppNotification(
+                                user_id=user_id,
+                                title=p_title,
+                                message=p_msg,
+                                is_read=False
+                            ))
+
+                # B. Auto-Sync Risk Notifications
+                employee = user_emp or session.query(Employees).filter_by(id=user_id, is_active=True).first()
+                if employee or is_admin:
+                    if is_admin:
+                        assigned_projects = session.query(Projects).filter(
+                            func.lower(func.coalesce(Projects.status, '')) != 'completed'
+                        ).all()
+                    else:
+                        assigned_projects = session.query(Projects).join(
+                            ProjectAssignments, Projects.id == ProjectAssignments.project_id
+                        ).filter(
+                            ProjectAssignments.employee_id == user_id,
+                            func.lower(func.coalesce(Projects.status, '')) != 'completed'
+                        ).all()
                     
-                    # Pre-calculate project accumulated costs
                     dev_costs = {row.project_id: float(row.cost or 0) for row in session.query(
                         DeveloperTasks.project_id, func.sum(DeveloperTasks.employee_cost).label('cost')
                     ).group_by(DeveloperTasks.project_id).all()}
@@ -3636,19 +4034,15 @@ class DatabaseOperations:
                         ContentCreatorTasks.project_id, func.sum(ContentCreatorTasks.employee_cost).label('cost')
                     ).group_by(ContentCreatorTasks.project_id).all()}
                     
-                    now = datetime.now()
-                    
                     for proj in assigned_projects:
                         is_at_risk = False
                         risk_reasons = []
                         
-                        # Check status
                         p_status = (proj.status or "").lower()
                         if "risk" in p_status or "delayed" in p_status or "critical" in p_status:
                             is_at_risk = True
                             risk_reasons.append(f"Status is '{proj.status}'")
                             
-                        # Check budget overrun
                         p_budget = float(proj.budget) if proj.budget else 0.0
                         total_cost = dev_costs.get(proj.id, 0.0) + content_costs.get(proj.id, 0.0)
                         if p_budget > 0.0 and total_cost >= p_budget:
@@ -3658,7 +4052,6 @@ class DatabaseOperations:
                             is_at_risk = True
                             risk_reasons.append(f"Nearing budget limit ({total_cost/p_budget*100:.1f}%)")
                             
-                        # Check deadline passed
                         if proj.end_date and proj.end_date != "N/A":
                             try:
                                 p_end = datetime.strptime(proj.end_date, "%Y-%m-%d")
@@ -3668,9 +4061,9 @@ class DatabaseOperations:
                             except:
                                 pass
                                 
-                        # Check missing SRS
                         srs_exists = session.query(SRS_Documents).filter_by(project_id=proj.id).first()
-                        if not srs_exists:
+                        has_srs_text = bool(getattr(proj, 'srs_text', None) and str(proj.srs_text).strip())
+                        if not srs_exists and not has_srs_text:
                             is_at_risk = True
                             risk_reasons.append("SRS Document is missing")
                             
@@ -3679,7 +4072,6 @@ class DatabaseOperations:
                             title = f"Project at Risk: {proj.name}"
                             msg = f"Project '{proj.name}' is flagged as at risk due to: {reason_str}."
                             
-                            # Check if notification already exists
                             exists = session.query(InAppNotification).filter_by(
                                 user_id=user_id,
                                 title=title,
@@ -3687,60 +4079,51 @@ class DatabaseOperations:
                             ).first()
                             
                             if not exists:
-                                new_notif = InAppNotification(
+                                session.add(InAppNotification(
                                     user_id=user_id,
                                     title=title,
                                     message=msg,
                                     is_read=False
-                                )
-                                session.add(new_notif)
-                                
-                    # B. Check Milestones at Risk/Delayed
-                    # Get assigned milestones (via MilestoneAssignments)
-                    assigned_milestones = session.query(ProjectTimeline, Projects.name).join(
-                        MilestoneAssignments, ProjectTimeline.id == MilestoneAssignments.milestone_id
-                    ).join(
-                        Projects, ProjectTimeline.project_id == Projects.id
-                    ).filter(
-                        MilestoneAssignments.employee_id == user_id,
-                        func.lower(func.coalesce(ProjectTimeline.status, '')) != 'completed'
+                                ))
+
+                # C. Auto-Sync Pending Leave Requests (For Admins and Managers)
+                from src.database.database_tables import LeaveRequest
+                if is_admin:
+                    pending_leaves = session.query(LeaveRequest).filter(
+                        LeaveRequest.status == "Pending"
                     ).all()
-                    
-                    for milestone, proj_name in assigned_milestones:
-                        is_m_at_risk = False
-                        m_reasons = []
+
+                    for l_req in pending_leaves:
+                        emp = session.query(Employees).filter_by(id=l_req.employee_id).first()
+                        emp_name = emp.full_name if (emp and emp.full_name) else (emp.username if (emp and emp.username) else l_req.employee_id)
                         
-                        m_status = (milestone.status or "").lower()
-                        if m_status == "delayed" or m_status == "at risk":
-                            is_m_at_risk = True
-                            m_reasons.append(f"Status is '{milestone.status}'")
-                            
-                        # Check deadline
-                        if milestone.expected_end and milestone.expected_end < now:
-                            is_m_at_risk = True
-                            m_reasons.append("Milestone deadline has passed")
-                            
-                        if is_m_at_risk:
-                            reason_str = ", ".join(m_reasons)
-                            title = f"Milestone Delayed: {milestone.milestone_name}"
-                            msg = f"Milestone '{milestone.milestone_name}' in project '{proj_name}' is delayed or at risk. Details: {reason_str}."
-                            
-                            exists = session.query(InAppNotification).filter_by(
+                        backup_name = "N/A"
+                        if l_req.backup_employee_id and l_req.backup_employee_id != "N/A":
+                            b_emp = session.query(Employees).filter_by(id=l_req.backup_employee_id).first()
+                            if b_emp: backup_name = b_emp.full_name
+
+                        start_str = l_req.start_date.strftime("%d %b %Y") if hasattr(l_req.start_date, 'strftime') else str(l_req.start_date).split(' ')[0]
+                        end_str = l_req.end_date.strftime("%d %b %Y") if hasattr(l_req.end_date, 'strftime') else str(l_req.end_date).split(' ')[0]
+                        days_str = f"{l_req.total_days or 1.0} Day(s)"
+                        
+                        l_title = f"📅 Leave Request: {emp_name} [Ref: {l_req.id}]"
+                        l_msg = f"Employee: {emp_name} | Type: {l_req.leave_type or 'Leave'} | Duration: {days_str} ({l_req.half_day_option or 'Full Day'}) | Dates: {start_str} → {end_str} | Backup: {backup_name} | Reason: {l_req.reason}"
+                        
+                        exists = session.query(InAppNotification).filter(
+                            InAppNotification.user_id == user_id,
+                            InAppNotification.title == l_title,
+                            InAppNotification.is_read == False
+                        ).first()
+
+                        if not exists:
+                            session.add(InAppNotification(
                                 user_id=user_id,
-                                title=title,
+                                title=l_title,
+                                message=l_msg,
                                 is_read=False
-                            ).first()
-                            
-                            if not exists:
-                                new_notif = InAppNotification(
-                                    user_id=user_id,
-                                    title=title,
-                                    message=msg,
-                                    is_read=False
-                                )
-                                session.add(new_notif)
-                                
-                    session.commit()
+                            ))
+
+                session.commit()
                 # ----------------------------------------------------
                 
                 total_notifs = session.query(InAppNotification).filter_by(user_id=user_id).order_by(InAppNotification.created_at.desc()).all()
@@ -3767,6 +4150,21 @@ class DatabaseOperations:
                 return json.dumps(self.model_to_dict(record), indent=4, default=str)
             except Exception as e:
                 session.rollback()
+                return self._handle_error("mark_notification_as_read", e)
+
+    def mark_all_notifications_as_read(self, user_id: str) -> str:
+        with self.SessionLocal() as session:
+            try:
+                from src.database.database_tables import InAppNotification
+                session.query(InAppNotification).filter_by(user_id=user_id, is_read=False).update(
+                    {"is_read": True}, synchronize_session=False
+                )
+                session.commit()
+                return json.dumps({"status": "success", "message": "All notifications marked as read."})
+            except Exception as e:
+                session.rollback()
+                return self._handle_error("mark_all_notifications_as_read", e)
+
                 return self._handle_error("mark_notification_as_read", e)
 
     def get_company_holidays(self) -> str:
@@ -3988,14 +4386,95 @@ class DatabaseOperations:
                 session.rollback()
                 return self._handle_error("add_client_receivable", e, context=data)
 
+    def _add_months_to_date(self, base_date: datetime, num_months: int) -> datetime:
+        import calendar
+        month = base_date.month - 1 + num_months
+        year = base_date.year + month // 12
+        month = month % 12 + 1
+        day = min(base_date.day, calendar.monthrange(year, month)[1])
+        return datetime(year, month, day, base_date.hour, base_date.minute, base_date.second)
+
+    def _sync_and_heal_receivable_due_dates_internal(self, session, project_id: str = None):
+        try:
+            from src.database.database_tables import ClientReceivables, ProjectPayments
+            query = session.query(ClientReceivables)
+            if project_id:
+                query = query.filter_by(project_id=project_id)
+            recs = query.all()
+
+            modified = False
+            for rec in recs:
+                pmt_query = session.query(ProjectPayments).filter(
+                    ProjectPayments.project_id == rec.project_id,
+                    ProjectPayments.reference_number == "AUTO-RECEIVABLE"
+                )
+                all_auto_pmts = pmt_query.all()
+                matched_count = 0
+                for pmt in all_auto_pmts:
+                    if pmt.remarks and rec.item_name and rec.item_name.lower() in pmt.remarks.lower():
+                        matched_count += 1
+                
+                if rec.frequency == "Monthly":
+                    base_start = rec.created_at or datetime.now()
+                    expected_date = self._add_months_to_date(base_start, matched_count)
+                    expected_date_str = expected_date.strftime("%Y-%m-%d")
+                    
+                    if rec.due_date != expected_date_str or rec.is_done:
+                        rec.due_date = expected_date_str
+                        rec.is_done = False
+                        modified = True
+                else:
+                    if matched_count == 0 and rec.is_done:
+                        rec.is_done = False
+                        modified = True
+                    elif matched_count > 0 and not rec.is_done:
+                        rec.is_done = True
+                        modified = True
+
+            if modified:
+                session.commit()
+        except Exception as e:
+            logger.error(f"Error in _sync_and_heal_receivable_due_dates_internal: {str(e)}", exc_info=True)
+
     def get_client_receivables(self, project_id: str) -> str:
         with self.SessionLocal() as session:
             try:
                 from src.database.database_tables import ClientReceivables
+                self._sync_and_heal_receivable_due_dates_internal(session, project_id)
                 recs = session.query(ClientReceivables).filter_by(project_id=project_id).order_by(ClientReceivables.due_date.asc()).all()
                 return json.dumps([self.model_to_dict(r) for r in recs], indent=4, default=str)
             except Exception as e:
                 return self._handle_error("get_client_receivables", e, context={"project_id": project_id})
+
+    def get_all_pending_client_receivables(self, user_id: str = None) -> str:
+        with self.SessionLocal() as session:
+            try:
+                from src.database.database_tables import ClientReceivables, Projects, Admins
+                self._sync_and_heal_receivable_due_dates_internal(session)
+                
+                query = session.query(ClientReceivables, Projects.name).join(
+                    Projects, ClientReceivables.project_id == Projects.id
+                ).filter(
+                    ClientReceivables.is_done == False
+                )
+
+                if user_id:
+                    is_admin = session.query(Admins).filter(
+                        (Admins.id == user_id) | (Admins.username == user_id)
+                    ).first() is not None
+                    if not is_admin:
+                        query = query.filter(Projects.manager_id == user_id)
+
+                results = query.order_by(ClientReceivables.due_date.asc()).all()
+                out = []
+                for rec, proj_name in results:
+                    item = self.model_to_dict(rec)
+                    item["project_name"] = proj_name
+                    out.append(item)
+                return json.dumps(out, indent=4, default=str)
+            except Exception as e:
+                return self._handle_error("get_all_pending_client_receivables", e)
+
 
     def delete_client_receivable(self, receivable_id: str) -> str:
         with self.SessionLocal() as session:
@@ -4015,7 +4494,6 @@ class DatabaseOperations:
         with self.SessionLocal() as session:
             try:
                 from src.database.database_tables import ClientReceivables, ProjectPayments
-                import calendar
                 
                 rec = session.query(ClientReceivables).filter_by(id=receivable_id).first()
                 if not rec:
@@ -4032,27 +4510,10 @@ class DatabaseOperations:
                         remarks=f"Auto-generated payment from Client Receivable reminder: {rec.item_name}"
                     )
                     session.add(new_payment)
+                    session.commit()
                 
-                if rec.frequency == "Monthly":
-                    # Parse current due date and add 1 month
-                    try:
-                        curr_date = datetime.strptime(rec.due_date, "%Y-%m-%d")
-                    except Exception:
-                        curr_date = datetime.now()
-                    
-                    # Custom standard-library logic to add exactly 1 month
-                    month = curr_date.month - 1 + 1
-                    year = curr_date.year + month // 12
-                    month = month % 12 + 1
-                    day = min(curr_date.day, calendar.monthrange(year, month)[1])
-                    next_date = datetime(year, month, day)
-                    
-                    rec.due_date = next_date.strftime("%Y-%m-%d")
-                    rec.is_done = False
-                else:
-                    rec.is_done = True
-                
-                session.commit()
+                # Run auto-healing sync to update due date based on active payment count
+                self._sync_and_heal_receivable_due_dates_internal(session, rec.project_id)
                 session.refresh(rec)
                 return json.dumps(self.model_to_dict(rec), indent=4, default=str)
             except Exception as e:
@@ -4119,6 +4580,150 @@ class DatabaseOperations:
                 return json.dumps(combined, indent=4, default=str)
             except Exception as e:
                 return self._handle_error("get_pending_handover_tasks", e)
+
+    # ==========================================
+    #      OPERATIONAL OBLIGATIONS & BILLS (PRB-058)
+    # ==========================================
+
+    def create_operational_obligation(self, title: str, category: str = "Office Rent", amount: float = 0.0, due_day: int = 5, recurrence: str = "Monthly", assigned_role: str = "All") -> Dict[str, Any]:
+        """Create a new recurring operational obligation (e.g. Office Rent, Electricity Bill)."""
+        with self.SessionLocal() as session:
+            try:
+                now = datetime.now()
+                year = now.year
+                month = now.month
+                due_day_calc = min(max(1, due_day), 28)
+                next_due = datetime(year, month, due_day_calc)
+                if next_due.date() < now.date():
+                    next_due = self._add_months_to_date(next_due, 1)
+
+                obligation = OperationalObligation(
+                    title=title,
+                    category=category,
+                    amount=amount,
+                    due_day=due_day_calc,
+                    recurrence=recurrence,
+                    assigned_role=assigned_role,
+                    status="PENDING",
+                    next_due_date=next_due,
+                    is_active=True
+                )
+                session.add(obligation)
+                session.commit()
+                session.refresh(obligation)
+                return self.model_to_dict(obligation)
+            except Exception as e:
+                session.rollback()
+                logger.error(f"Failed to create operational obligation: {str(e)}")
+                raise e
+
+    def get_all_operational_obligations(self, active_only: bool = True) -> List[Dict[str, Any]]:
+        """Retrieve operational obligations with auto-computed status."""
+        with self.SessionLocal() as session:
+            try:
+                query = session.query(OperationalObligation)
+                if active_only:
+                    query = query.filter(OperationalObligation.is_active == True)
+                
+                obligations = query.order_by(OperationalObligation.due_day.asc()).all()
+                now = datetime.now()
+
+                results = []
+                for ob in obligations:
+                    ob_dict = self.model_to_dict(ob)
+                    if ob.next_due_date and ob.next_due_date.date() <= now.date() and ob.status != "COMPLETED":
+                        ob_dict["status"] = "OVERDUE"
+                    results.append(ob_dict)
+                return results
+            except Exception as e:
+                logger.error(f"Failed to get operational obligations: {str(e)}")
+                return []
+
+    def get_pending_operational_obligations(self, role: str = None) -> List[Dict[str, Any]]:
+        """Retrieve active pending/overdue obligations requiring persistent admin/manager popups."""
+        with self.SessionLocal() as session:
+            try:
+                now = datetime.now()
+                query = session.query(OperationalObligation).filter(
+                    OperationalObligation.is_active == True,
+                    OperationalObligation.status.in_(["PENDING", "OVERDUE"])
+                )
+                if role:
+                    query = query.filter(OperationalObligation.assigned_role.in_([role, "All"]))
+
+                obligations = query.all()
+                results = []
+                for ob in obligations:
+                    ob_dict = self.model_to_dict(ob)
+                    if ob.next_due_date and ob.next_due_date.date() < now.date():
+                        ob_dict["status"] = "OVERDUE"
+                    elif ob.next_due_date and ob.next_due_date.date() == now.date():
+                        ob_dict["status"] = "DUE TODAY"
+                    results.append(ob_dict)
+                return results
+            except Exception as e:
+                logger.error(f"Failed to get pending operational obligations: {str(e)}")
+                return []
+
+    def complete_operational_obligation(self, obligation_id: str, user_id: str, role: str, remarks: str, amount_paid: float = None, custom_next_due: str = None, proof_image_url: str = "N/A") -> Dict[str, Any]:
+        """Mark an operational obligation as completed with remarks and proof, logging completion history."""
+        with self.SessionLocal() as session:
+            try:
+                ob = session.query(OperationalObligation).filter(OperationalObligation.id == obligation_id).first()
+                if not ob:
+                    raise ValueError("Operational obligation not found")
+
+                now = datetime.now()
+                paid_val = amount_paid if amount_paid is not None else (ob.amount or 0.0)
+
+                if custom_next_due:
+                    try:
+                        next_due = datetime.strptime(custom_next_due, "%Y-%m-%d")
+                    except Exception:
+                        next_due = self._add_months_to_date(ob.next_due_date or now, 1)
+                else:
+                    next_due = self._add_months_to_date(ob.next_due_date or now, 1)
+
+                ob.status = "COMPLETED"
+                ob.last_completed_at = now
+                ob.last_completion_remark = remarks
+                ob.last_completion_proof_url = proof_image_url
+                ob.next_due_date = next_due
+                ob.updated_at = now
+
+                completion_log = ObligationCompletionLog(
+                    obligation_id=ob.id,
+                    completed_by_user_id=user_id or "Admin",
+                    completed_by_role=role or "Admin",
+                    completion_date=now,
+                    amount_paid=paid_val,
+                    remarks=remarks,
+                    proof_image_url=proof_image_url,
+                    next_due_date=next_due
+                )
+                session.add(completion_log)
+                session.commit()
+                session.refresh(ob)
+                return self.model_to_dict(ob)
+            except Exception as e:
+                session.rollback()
+                logger.error(f"Failed to complete operational obligation: {str(e)}")
+                raise e
+
+    def delete_operational_obligation(self, obligation_id: str) -> bool:
+        """Deactivate / remove an operational obligation task."""
+        with self.SessionLocal() as session:
+            try:
+                ob = session.query(OperationalObligation).filter(OperationalObligation.id == obligation_id).first()
+                if ob:
+                    ob.is_active = False
+                    session.commit()
+                    return True
+                return False
+            except Exception as e:
+                session.rollback()
+                logger.error(f"Failed to delete operational obligation: {str(e)}")
+                return False
 
 
 

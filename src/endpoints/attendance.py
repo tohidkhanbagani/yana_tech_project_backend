@@ -12,6 +12,12 @@ db = DatabaseOperations()
 
 class CheckInRequest(BaseModel):
     ip_address: Optional[str] = None
+    work_mode: Optional[str] = "Office"  # "Office", "Work From Home", "Out of Office"
+    device_info: Optional[str] = "Unknown"
+
+class CheckOutRequest(BaseModel):
+    ip_address: Optional[str] = None
+    device_info: Optional[str] = "Unknown"
 
 class LeaveRequestSubmit(BaseModel):
     start_date: str
@@ -27,16 +33,21 @@ class LeaveRequestSubmit(BaseModel):
     milestone_id: Optional[str] = None
     task_type: Optional[str] = None
 
+from src.endpoints.websockets import manager
+
 class LeaveRequestStatusUpdate(BaseModel):
     status: str
 
 @router.post("/attendance/check-in", tags=["Attendance"])
-def employee_check_in(req: CheckInRequest, request: Request, current_user: dict = Depends(get_current_user)):
+async def employee_check_in(req: CheckInRequest, request: Request, current_user: dict = Depends(get_current_user)):
     try:
-        # Prevent admins from checking in if this is only for employees
-        # But we'll allow anyone for now, or assume current_user.id is employee_id
         ip_addr = req.ip_address or request.client.host
-        response = db.check_in(current_user["id"], ip_address=ip_addr)
+        device = req.device_info or request.headers.get("user-agent", "Unknown")
+        response = db.check_in(current_user["id"], ip_address=ip_addr, work_mode=req.work_mode, device_info=device)
+        try:
+            await manager.broadcast({"action": "REFRESH_WORKSPACE"})
+        except Exception as ws_err:
+            logger.warning(f"WebSocket broadcast failed on check-in: {str(ws_err)}")
         return handle_response(response)
     except HTTPException:
         raise
@@ -45,13 +56,20 @@ def employee_check_in(req: CheckInRequest, request: Request, current_user: dict 
         raise HTTPException(status_code=500, detail="Failed to check in.")
 
 @router.post("/attendance/check-out", tags=["Attendance"])
-def employee_check_out(current_user: dict = Depends(get_current_user)):
+async def employee_check_out(req: CheckOutRequest, request: Request, current_user: dict = Depends(get_current_user)):
     try:
-        response = db.check_out(current_user["id"])
+        ip_addr = req.ip_address or request.client.host
+        device = req.device_info or request.headers.get("user-agent", "Unknown")
+        response = db.check_out(current_user["id"], ip_address=ip_addr, device_info=device)
+        try:
+            await manager.broadcast({"action": "REFRESH_WORKSPACE"})
+        except Exception as ws_err:
+            logger.warning(f"WebSocket broadcast failed on check-out: {str(ws_err)}")
         return handle_response(response)
     except Exception as e:
         logger.error(f"Router Error in employee_check_out: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to check out.")
+
 
 @router.get("/attendance/me", tags=["Attendance"])
 @router.get("/attendance/my-status", tags=["Attendance"])
@@ -64,12 +82,12 @@ def get_my_attendance_status(current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail="Failed to fetch attendance status.")
 
 @router.get("/attendance/all", tags=["Attendance"])
-def get_all_attendance(current_user: dict = Depends(get_current_user)):
+def get_all_attendance(start_date: Optional[str] = None, end_date: Optional[str] = None, current_user: dict = Depends(get_current_user)):
     try:
         # Check admin role? For now rely on frontend or basic role check
         if current_user.get("role") != "admin":
             raise HTTPException(status_code=403, detail="Access denied.")
-        response = db.get_all_attendance()
+        response = db.get_all_attendance(start_date=start_date, end_date=end_date)
         return handle_response(response)
     except HTTPException:
         raise
@@ -78,11 +96,11 @@ def get_all_attendance(current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail="Failed to fetch attendance records.")
 
 @router.get("/attendance/login-history", tags=["Attendance"])
-def get_all_login_history(current_user: dict = Depends(get_current_user)):
+def get_all_login_history(start_date: Optional[str] = None, end_date: Optional[str] = None, current_user: dict = Depends(get_current_user)):
     try:
         if current_user.get("role") != "admin":
             raise HTTPException(status_code=403, detail="Access denied.")
-        response = db.get_all_login_history()
+        response = db.get_all_login_history(start_date=start_date, end_date=end_date)
         return handle_response(response)
     except HTTPException:
         raise
@@ -91,11 +109,11 @@ def get_all_login_history(current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail="Failed to fetch login history.")
 
 @router.get("/attendance/leave-requests", tags=["Attendance"])
-def get_all_leave_requests(current_user: dict = Depends(get_current_user)):
+def get_all_leave_requests(start_date: Optional[str] = None, end_date: Optional[str] = None, current_user: dict = Depends(get_current_user)):
     try:
         if current_user.get("role") != "admin":
             raise HTTPException(status_code=403, detail="Access denied.")
-        response = db.get_all_leave_requests()
+        response = db.get_all_leave_requests(start_date=start_date, end_date=end_date)
         return handle_response(response)
     except HTTPException:
         raise
@@ -154,6 +172,18 @@ def update_leave_request_status(leave_id: str, req: LeaveRequestStatusUpdate, cu
         if current_user.get("role") != "admin":
             raise HTTPException(status_code=403, detail="Access denied.")
         response = db.update_leave_request_status(leave_id, req.status)
+
+        try:
+            user_id = current_user.get("username", "Admin")
+            db.write_audit_log(
+                user_id=user_id,
+                action="LEAVE_STATUS_UPDATE",
+                target_id=str(leave_id),
+                details={"status": req.status}
+            )
+        except Exception:
+            pass
+
         return handle_response(response)
     except HTTPException:
         raise
@@ -199,6 +229,18 @@ def mark_notification_read(notif_id: str, current_user: dict = Depends(get_curre
     except Exception as e:
         logger.error(f"Router Error in mark_notification_read: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to mark notification as read.")
+
+@router.post("/attendance/notifications/mark-all-read", tags=["Attendance"])
+def mark_all_notifications_read(current_user: dict = Depends(get_current_user)):
+    try:
+        response = db.mark_all_notifications_as_read(current_user["id"])
+        return handle_response(response)
+    except Exception as e:
+        logger.error(f"Router Error in mark_all_notifications_read: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to mark all notifications as read.")
+
+
+
 
 class HolidaySubmit(BaseModel):
     name: str

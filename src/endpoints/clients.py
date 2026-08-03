@@ -37,6 +37,21 @@ def create_client(client: schemas.ClientCreate, db: Session = Depends(get_db)):
         db.add(new_client)
         db.commit()
         db.refresh(new_client)
+
+        try:
+            db_ops.write_audit_log(
+                user_id="Admin",
+                action="CLIENT_CREATE",
+                target_id=str(new_client.id),
+                details={
+                    "client_name": new_client.name,
+                    "company": new_client.company,
+                    "email": new_client.email
+                }
+            )
+        except Exception:
+            pass
+
         return db_ops.model_to_dict(new_client)
     except Exception as e:
         db.rollback()

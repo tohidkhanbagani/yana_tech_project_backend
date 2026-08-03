@@ -66,6 +66,8 @@ class Employees(Base):
     hourly_cost_rate = Column(Float, nullable=True, default=0.0)
     hourly_billing_rate = Column(Float, nullable=True, default=0.0)
     salary = Column(Float, nullable=True, default=0.0)
+    working_days = Column(Integer, nullable=True, default=22)
+    shift_hours = Column(Integer, nullable=True, default=8)
     
     # Legal & Compliance Documents
     adhar_number = Column(String, nullable=True, default="N/A")
@@ -109,6 +111,14 @@ class Employees(Base):
     profile_unlocked = Column(Boolean, nullable=True, default=False)
     profile_unlocked_until = Column(DateTime, nullable=True, default=None)
     
+    # Leave Quota & Inventory Balances
+    total_paid_leaves = Column(Float, nullable=True, default=18.0)
+    used_paid_leaves = Column(Float, nullable=True, default=0.0)
+    total_casual_leaves = Column(Float, nullable=True, default=6.0)
+    used_casual_leaves = Column(Float, nullable=True, default=0.0)
+    total_sick_leaves = Column(Float, nullable=True, default=6.0)
+    used_sick_leaves = Column(Float, nullable=True, default=0.0)
+
     created_at = Column(DateTime, default=datetime.now)
     working_hours = Column(Float, nullable=True, default=8.0)
     shift_start_time = Column(String, nullable=True, default="09:00")
@@ -166,6 +176,8 @@ class Projects(Base):
     billing_cycle = Column(String, nullable=True, default="N/A")
     billing_rate = Column(Float, nullable=True, default=0.0)
     next_billing_date = Column(String, nullable=True, default="N/A")
+    next_billing_time = Column(String, nullable=True, default="09:00")
+    billing_interval_days = Column(Integer, nullable=True, default=30)
     
     # Timeline & Performance
     start_date = Column(String, nullable=True, default="N/A")
@@ -175,10 +187,6 @@ class Projects(Base):
     # Registry & Referrals (The "Proper Place" for Metadata)
     manager = Column(String, nullable=True, default="N/A manager") # TODO: Connect to Managers.id
     client = Column(String, nullable=True, default="N/A")         # TODO: Connect to Clients.id
-    referred_by = Column(String, nullable=True, default="N/A")   # Source of the project
-    filled_by = Column(String, nullable=True, default="N/A")     # User who created the record
-    assigned_to = Column(String, nullable=True, default="N/A")   # Primary lead or legacy string
-    team = Column(String, nullable=True, default="N/A")         # Team label or department
     
     # Link to active SRS document. 
     # Defined as string to avoid strict circular dependency with SRS_Documents table load order.
@@ -426,6 +434,10 @@ class Attendance(Base):
     status = Column(String, nullable=False, default="Present") # Present, Late, Half-Day, Absent, On Leave
     attendance_status = Column(String, nullable=True, default="Present") # Present, Late, Half-Day, Absent, On Leave, Extended Shift
     ip_address = Column(String, nullable=True)
+    checkout_ip_address = Column(String, nullable=True)
+    device_info = Column(String, nullable=True)
+    checkout_device_info = Column(String, nullable=True)
+    work_mode = Column(String, nullable=True, default="Office")
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
@@ -489,5 +501,37 @@ class ProjectBilling(Base):
     status = Column(String, nullable=False, default="Billed") # Billed, Paid, Partial, Void
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+class OperationalObligation(Base):
+    __tablename__ = "operational_obligations"
+    id = Column(String, primary_key=True, default=generate_uuid)
+    title = Column(String, nullable=False) # e.g., 'Office Rent', 'Electricity Bill'
+    category = Column(String, nullable=False, default="Office Rent") # Rent, Electricity, Internet, Water, Tax, Maintenance, Other
+    amount = Column(Float, nullable=True, default=0.0)
+    due_day = Column(Integer, nullable=False, default=5) # 1-31
+    recurrence = Column(String, nullable=False, default="Monthly") # Monthly, Quarterly, Yearly
+    assigned_role = Column(String, nullable=False, default="All") # Admin, Manager, All
+    status = Column(String, nullable=False, default="PENDING") # PENDING, OVERDUE, COMPLETED
+    last_completed_at = Column(DateTime, nullable=True)
+    last_completion_remark = Column(Text, nullable=True, default="N/A")
+    last_completion_proof_url = Column(Text, nullable=True, default="N/A")
+    next_due_date = Column(DateTime, nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+class ObligationCompletionLog(Base):
+    __tablename__ = "obligation_completion_logs"
+    id = Column(String, primary_key=True, default=generate_uuid)
+    obligation_id = Column(String, ForeignKey("operational_obligations.id"), nullable=False)
+    completed_by_user_id = Column(String, nullable=False)
+    completed_by_role = Column(String, nullable=False, default="Admin")
+    completion_date = Column(DateTime, default=datetime.now)
+    amount_paid = Column(Float, nullable=True, default=0.0)
+    remarks = Column(Text, nullable=False)
+    proof_image_url = Column(Text, nullable=True, default="N/A")
+    next_due_date = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.now)
+
 
 
